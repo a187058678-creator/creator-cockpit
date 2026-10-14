@@ -1,0 +1,97 @@
+{
+  "processed_by": "probe-worker",
+  "completed_at": "2026-10-14T16:54:01.109630+00:00",
+  "pipeline": {
+    "source_type": "youtube",
+    "used_yt_dlp": true,
+    "used_ffmpeg": true,
+    "used_ffmpeg_dedupe": true,
+    "working_directory": "D:\\软件\\云端自助发布\\creator-cockpit\\worker\\runtime\\task-1",
+    "schema_version": "creator-task/v1"
+  },
+  "source": {
+    "value": "https://www.youtube.com/shorts/QfZnSS1hgy0",
+    "downloaded_path": "D:\\软件\\云端自助发布\\creator-cockpit\\worker\\runtime\\task-1\\raw\\source.mp4",
+    "normalized_path": "D:\\软件\\云端自助发布\\creator-cockpit\\worker\\runtime\\task-1\\processed\\normalized.mp4",
+    "final_path": "D:\\软件\\云端自助发布\\creator-cockpit\\worker\\runtime\\task-1\\output\\final.mp4"
+  },
+  "asset": {
+    "source_type": "worker",
+    "bucket": "creator-cockpit",
+    "key": "processed/task-1-1791996838.mp4",
+    "prefix": "processed",
+    "original_filename": "final.mp4",
+    "stored_filename": "task-1-1791996838.mp4",
+    "content_type": "video/mp4",
+    "size_bytes": 1080416,
+    "storage_url": "https://add8c6a31d7f4609f15311cd42b9631b.r2.cloudflarestorage.com/creator-cockpit/processed/task-1-1791996838.mp4"
+  },
+  "task_payload": {
+    "schema_version": "creator-task/v1",
+    "source": {
+      "asset_key": "",
+      "start_seconds": 0.0,
+      "end_seconds": 0.0
+    },
+    "publish": {
+      "platforms": [
+        "tiktok"
+      ],
+      "need_subtitles": true
+    },
+    "output": {
+      "prefix": "processed",
+      "target_height": 720,
+      "video_codec": "libx264",
+      "audio_codec": "aac"
+    },
+    "execution": {
+      "max_retries": 2,
+      "simulate_fail": false
+    },
+    "dedupe": {
+      "enabled": true,
+      "profile": "balanced",
+      "intensity": 0.55,
+      "seed": 0,
+      "randomize": true,
+      "trim": {
+        "head_seconds": 0.18,
+        "tail_seconds": 0.12
+      },
+      "speed": {
+        "min_factor": 1.01,
+        "max_factor": 1.035
+      },
+      "crop": {
+        "min_ratio": 0.978,
+        "max_ratio": 0.994
+      },
+      "rotation": {
+        "min_degrees": -0.45,
+        "max_degrees": 0.45
+      },
+      "mirror_chance": 0.15,
+      "color": {
+        "brightness_min": 0.97,
+        "brightness_max": 1.04,
+        "contrast_min": -4.0,
+        "contrast_max": 8.0
+      }
+    }
+  },
+  "dedupe_plan": {
+    "profile": "balanced",
+    "seed": 1,
+    "intensity": 0.55,
+    "head_trim_seconds": 0.18,
+    "tail_trim_seconds": 0.12,
+    "speed_factor": 1.0090071991039171,
+    "crop_ratio": 0.9890824053481891,
+    "rotation_degrees": -0.0022596318894892164,
+    "mirror": false,
+    "brightness_factor": 1.0085863294498263,
+    "contrast_amount": 3.005574117494387
+  },
+  "message": "Worker 已完成真实拉素材 / FFmpeg 归一化 / FFmpeg 去重流水线 / R2 上传流程"
+}
