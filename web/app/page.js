@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 const cardStyle = {
   background: "#121933",
@@ -38,7 +38,22 @@ const secondaryButtonStyle = {
 
 const taskStatusOptions = ["pending", "queued", "running", "success", "failed", "cancelled"];
 
-function StatusBadge({ ok, text }) {
+function formatDate(value) {
+  if (!value) {
+    return "-";
+  }
+  return new Date(value).toLocaleString("zh-CN", { hour12: false });
+}
+
+async function readJson(response) {
+  const data = await response.json();
+  if (!response.ok) {
+    throw new Error(data.detail || "请求失败");
+  }
+  return data;
+}
+
+function StatusPill({ ok, text }) {
   return (
     <span
       style={{
@@ -66,41 +81,38 @@ function StatusBadge({ ok, text }) {
   );
 }
 
-function formatDate(value) {
-  if (!value) {
-    return "-";
-  }
-  return new Date(value).toLocaleString("zh-CN", { hour12: false });
-}
-
-async function readJson(response) {
-  const data = await response.json();
-  if (!response.ok) {
-    throw new Error(data.detail || "请求失败");
-  }
-  return data;
-}
-
-function SectionHeader({ id, title, hint, action }) {
+function Section({ id, title, hint, action, children }) {
   return (
-    <div
-      id={id}
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        gap: 12,
-        flexWrap: "wrap",
-        marginBottom: 14,
-      }}
-    >
-      <div>
-        <h2 style={{ margin: 0, fontSize: 18 }}>{title}</h2>
-        {hint ? (
-          <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>{hint}</div>
-        ) : null}
+    <section id={id} style={cardStyle}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 12,
+          flexWrap: "wrap",
+          marginBottom: 14,
+        }}
+      >
+        <div>
+          <h2 style={{ margin: 0, fontSize: 18 }}>{title}</h2>
+          {hint ? (
+            <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>{hint}</div>
+          ) : null}
+        </div>
+        {action}
       </div>
-      {action}
+      {children}
+    </section>
+  );
+}
+
+function SummaryCard({ label, value, hint, ok = true }) {
+  return (
+    <div style={{ ...cardStyle, padding: 14 }}>
+      <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 8 }}>{label}</div>
+      <div style={{ fontSize: 28, fontWeight: 700, marginBottom: 10 }}>{value}</div>
+      <StatusPill ok={ok} text={hint} />
     </div>
   );
 }
@@ -110,9 +122,7 @@ export default function HomePage() {
 
   const [health, setHealth] = useState({ loading: true, ok: false, detail: "" });
   const [summary, setSummary] = useState({
-    loading: true,
     total_asset_records: 0,
-    total_tasks: 0,
     pending_tasks: 0,
     online_workers: 0,
     bucket: "",
@@ -127,6 +137,7 @@ export default function HomePage() {
     pending: 0,
     running: 0,
     success: 0,
+    failed: 0,
     latest: null,
   });
   const [workerSummary, setWorkerSummary] = useState({
@@ -140,8 +151,8 @@ export default function HomePage() {
   const [tasks, setTasks] = useState([]);
   const [workers, setWorkers] = useState([]);
   const [taskDrafts, setTaskDrafts] = useState({});
-  const [listPrefix, setListPrefix] = useState("assets");
   const [taskFilter, setTaskFilter] = useState("");
+  const [listPrefix, setListPrefix] = useState("assets");
   const [textPrefix, setTextPrefix] = useState("assets");
   const [textFilename, setTextFilename] = useState("");
   const [textBody, setTextBody] = useState("hello from creator cockpit");
@@ -167,52 +178,15 @@ export default function HomePage() {
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("已就绪");
 
-  const latestAsset = useMemo(() => assets[0], [assets]);
-
-  const statCards = [
-    {
-      title: "API",
-      value: health.loading ? "检查中" : health.ok ? "正常" : "异常",
-      hint: "Railway FastAPI 服务",
-      ok: health.ok,
-    },
-    {
-      title: "数据库",
-      value: summary.database_configured ? "已接入" : "未接入",
-      hint: "任务 / 资产 / Worker",
-      ok: summary.database_configured,
-    },
-    {
-      title: "R2",
-      value: summary.storage_configured ? "已接入" : "未接入",
-      hint: summary.bucket || "对象存储",
-      ok: summary.storage_configured,
-    },
-    {
-      title: "待处理任务",
-      value: String(summary.pending_tasks || 0),
-      hint: "pending / queued",
-      ok: (summary.pending_tasks || 0) > 0,
-    },
-    {
-      title: "在线 Worker",
-      value: String(summary.online_workers || 0),
-      hint: "idle / running / online",
-      ok: (summary.online_workers || 0) > 0,
-    },
-    {
-      title: "资产记录",
-      value: String(summary.total_asset_records || 0),
-      hint: "asset_records",
-      ok: (summary.total_asset_records || 0) > 0,
-    },
-  ];
-
   async function loadHealth() {
     setHealth({ loading: true, ok: false, detail: "" });
     try {
       const data = await readJson(await fetch("/api/health", { cache: "no-store" }));
-      setHealth({ loading: false, ok: !!data.ok, detail: JSON.stringify(data) });
+      setHealth({
+        loading: false,
+        ok: !!data.ok,
+        detail: data.detail || JSON.stringify(data),
+      });
     } catch (error) {
       setHealth({ loading: false, ok: false, detail: error.message || "请求失败" });
     }
@@ -221,10 +195,49 @@ export default function HomePage() {
   async function loadSummary() {
     try {
       const data = await readJson(await fetch("/api/dashboard/summary", { cache: "no-store" }));
-      setSummary((prev) => ({ ...prev, loading: false, ...data }));
+      setSummary(data);
     } catch (error) {
-      setSummary((prev) => ({ ...prev, loading: false }));
       setMessage(error.message || "获取系统摘要失败");
+    }
+  }
+
+  async function loadTaskSummary() {
+    try {
+      const data = await readJson(await fetch("/api/tasks/summary", { cache: "no-store" }));
+      setTaskSummary(data);
+    } catch (error) {
+      setMessage(error.message || "获取任务摘要失败");
+    }
+  }
+
+  async function loadWorkerSummary() {
+    try {
+      const data = await readJson(await fetch("/api/workers/summary", { cache: "no-store" }));
+      setWorkerSummary(data);
+    } catch (error) {
+      setMessage(error.message || "获取 Worker 摘要失败");
+    }
+  }
+
+  async function loadTasks(status = taskFilter) {
+    try {
+      const data = await readJson(
+        await fetch(`/api/tasks?status=${encodeURIComponent(status)}`, { cache: "no-store" })
+      );
+      setTasks(data.items || []);
+    } catch (error) {
+      setTasks([]);
+      setMessage(error.message || "获取任务列表失败");
+    }
+  }
+
+  async function loadWorkers() {
+    try {
+      const data = await readJson(await fetch("/api/workers", { cache: "no-store" }));
+      setWorkers(data.items || []);
+    } catch (error) {
+      setWorkers([]);
+      setMessage(error.message || "获取 Worker 列表失败");
     }
   }
 
@@ -250,47 +263,7 @@ export default function HomePage() {
       setRecords(data.items || []);
     } catch (error) {
       setRecords([]);
-      setMessage(error.message || "获取上传记录失败");
-    }
-  }
-
-  async function loadTasks(status = taskFilter) {
-    try {
-      const data = await readJson(
-        await fetch(`/api/tasks?status=${encodeURIComponent(status)}`, { cache: "no-store" })
-      );
-      setTasks(data.items || []);
-    } catch (error) {
-      setTasks([]);
-      setMessage(error.message || "获取任务列表失败");
-    }
-  }
-
-  async function loadTaskSummary() {
-    try {
-      const data = await readJson(await fetch("/api/tasks/summary", { cache: "no-store" }));
-      setTaskSummary(data);
-    } catch (error) {
-      setMessage(error.message || "获取任务摘要失败");
-    }
-  }
-
-  async function loadWorkers() {
-    try {
-      const data = await readJson(await fetch("/api/workers", { cache: "no-store" }));
-      setWorkers(data.items || []);
-    } catch (error) {
-      setWorkers([]);
-      setMessage(error.message || "获取 Worker 列表失败");
-    }
-  }
-
-  async function loadWorkerSummary() {
-    try {
-      const data = await readJson(await fetch("/api/workers/summary", { cache: "no-store" }));
-      setWorkerSummary(data);
-    } catch (error) {
-      setMessage(error.message || "获取 Worker 摘要失败");
+      setMessage(error.message || "获取数据库记录失败");
     }
   }
 
@@ -298,12 +271,12 @@ export default function HomePage() {
     await Promise.all([
       loadHealth(),
       loadSummary(),
+      loadTaskSummary(),
+      loadWorkerSummary(),
+      loadTasks(taskFilter),
+      loadWorkers(),
       loadAssets(listPrefix),
       loadRecords(listPrefix),
-      loadTasks(taskFilter),
-      loadTaskSummary(),
-      loadWorkers(),
-      loadWorkerSummary(),
     ]);
   }
 
@@ -314,7 +287,7 @@ export default function HomePage() {
   async function uploadText(event) {
     event.preventDefault();
     setBusy("text");
-    setMessage("正在上传文本文件...");
+    setMessage("正在上传文本...");
     try {
       const data = await readJson(
         await fetch("/api/assets/text", {
@@ -343,6 +316,7 @@ export default function HomePage() {
       setMessage("请先选择文件");
       return;
     }
+
     setBusy("file");
     setMessage("正在上传文件...");
     try {
@@ -370,15 +344,14 @@ export default function HomePage() {
     setBusy("task");
     setMessage("正在创建任务...");
     try {
-      const payload = {
-        ...taskForm,
-        payload: JSON.parse(taskForm.payload || "{}"),
-      };
       const data = await readJson(
         await fetch("/api/tasks", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
+          body: JSON.stringify({
+            ...taskForm,
+            payload: JSON.parse(taskForm.payload || "{}"),
+          }),
         })
       );
       setMessage(`任务已创建：#${data.item.id} ${data.item.title}`);
@@ -406,7 +379,7 @@ export default function HomePage() {
     const nextWorkerCode = draft.assigned_worker_code ?? task.assigned_worker_code ?? "";
 
     setBusy(`task-${task.id}`);
-    setMessage(`正在更新任务 #${task.id}...`);
+    setMessage(`正在保存任务 #${task.id}...`);
     try {
       const data = await readJson(
         await fetch(`/api/tasks/${task.id}`, {
@@ -427,8 +400,8 @@ export default function HomePage() {
       await Promise.all([
         loadTasks(taskFilter),
         loadTaskSummary(),
-        loadWorkers(),
         loadWorkerSummary(),
+        loadWorkers(),
         loadSummary(),
       ]);
     } catch (error) {
@@ -439,7 +412,7 @@ export default function HomePage() {
   }
 
   async function retryTask(taskId) {
-    setBusy(`task-retry-${taskId}`);
+    setBusy(`retry-${taskId}`);
     setMessage(`正在重试任务 #${taskId}...`);
     try {
       const data = await readJson(
@@ -451,8 +424,8 @@ export default function HomePage() {
       await Promise.all([
         loadTasks(taskFilter),
         loadTaskSummary(),
-        loadWorkers(),
         loadWorkerSummary(),
+        loadWorkers(),
         loadSummary(),
       ]);
     } catch (error) {
@@ -465,7 +438,7 @@ export default function HomePage() {
   async function submitHeartbeat(event) {
     event.preventDefault();
     setBusy("worker");
-    setMessage("正在提交 Worker 心跳...");
+    setMessage("正在登记 Worker...");
     try {
       const data = await readJson(
         await fetch("/api/workers/heartbeat", {
@@ -490,7 +463,7 @@ export default function HomePage() {
   }
 
   async function createPreviewLink(key) {
-    setBusy(key);
+    setBusy(`preview-${key}`);
     try {
       const data = await readJson(await fetch(`/api/assets/presign?key=${encodeURIComponent(key)}`));
       window.open(data.url, "_blank", "noopener,noreferrer");
@@ -501,619 +474,545 @@ export default function HomePage() {
     }
   }
 
-  const navItems = [
-    ["system", "系统总览"],
-    ["upload", "存储工作台"],
-    ["tasks", "任务中心"],
-    ["workers", "Worker 节点"],
-    ["assets", "R2 对象列表"],
-    ["records", "数据库记录"],
+  const summaryCards = [
+    {
+      label: "服务状态",
+      value: health.loading ? "检查中" : health.ok ? "正常" : "异常",
+      hint: "API 健康检查",
+      ok: health.ok,
+    },
+    {
+      label: "待处理任务",
+      value: String(taskSummary.pending || 0),
+      hint: "还没被 Worker 领取",
+      ok: (taskSummary.pending || 0) > 0,
+    },
+    {
+      label: "在线 Worker",
+      value: String(workerSummary.online || 0),
+      hint: "可领取任务的节点",
+      ok: (workerSummary.online || 0) > 0,
+    },
+    {
+      label: "资产记录",
+      value: String(summary.total_asset_records || 0),
+      hint: summary.bucket || "R2 / 数据库",
+      ok: summary.storage_configured,
+    },
   ];
 
   return (
-    <main style={{ maxWidth: 1500, margin: "0 auto", padding: 24 }}>
+    <main style={{ maxWidth: 1440, margin: "0 auto", padding: 20 }}>
       <section
         style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "flex-start",
+          display: "grid",
+          gridTemplateColumns: "minmax(0, 1fr) minmax(260px, 360px)",
           gap: 16,
-          marginBottom: 20,
-          flexWrap: "wrap",
+          marginBottom: 16,
         }}
       >
         <div>
-          <h1 style={{ margin: 0, fontSize: 32 }}>Creator Cockpit</h1>
-          <p style={{ margin: "8px 0 0", color: "#94a3b8", fontSize: 14 }}>
-            运营中台骨架：系统巡检、R2 存储、任务中心、Worker 节点、数据库记录。
-          </p>
+          <h1 style={{ margin: 0, fontSize: 34 }}>Creator Cockpit</h1>
+          <div style={{ marginTop: 8, color: "#94a3b8", fontSize: 14 }}>
+            先看系统活没活，再建任务、看 Worker、最后查文件和记录。
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 }}>
+            <a href="#overview" style={{ ...secondaryButtonStyle, textDecoration: "none" }}>运行状态</a>
+            <a href="#tasks" style={{ ...secondaryButtonStyle, textDecoration: "none" }}>创建任务</a>
+            <a href="#workers" style={{ ...secondaryButtonStyle, textDecoration: "none" }}>Worker 节点</a>
+            <a href="#storage" style={{ ...secondaryButtonStyle, textDecoration: "none" }}>文件与记录</a>
+          </div>
         </div>
-        <div style={{ ...cardStyle, minWidth: 340 }}>
+
+        <div style={cardStyle}>
           <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 8 }}>当前 API 地址</div>
           <div style={{ fontSize: 13, wordBreak: "break-all" }}>{apiBaseUrl}</div>
-          <div style={{ marginTop: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button style={buttonStyle} onClick={reloadAll}>
-              一键刷新
+          <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+            <button type="button" style={buttonStyle} onClick={reloadAll}>
+              刷新全部
             </button>
             <button
+              type="button"
               style={secondaryButtonStyle}
               onClick={() => window.open("/api/dashboard/summary", "_blank", "noopener,noreferrer")}
             >
-              打开摘要 JSON
+              看摘要 JSON
             </button>
           </div>
         </div>
       </section>
 
       <section
+        id="overview"
         style={{
           display: "grid",
-          gridTemplateColumns: "260px minmax(0, 1fr)",
+          gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
           gap: 16,
-          alignItems: "start",
+          marginBottom: 16,
         }}
       >
-        <aside style={{ ...cardStyle, position: "sticky", top: 24 }}>
-          <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 14 }}>后台导航</div>
-          <div style={{ display: "grid", gap: 10 }}>
-            {navItems.map(([id, label]) => (
-              <a
-                key={id}
-                href={`#${id}`}
-                style={{
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  background: "#18213f",
-                  color: "#e5e7eb",
-                  fontSize: 13,
-                  border: "1px solid #26314f",
-                  textDecoration: "none",
+        {summaryCards.map((item) => (
+          <SummaryCard
+            key={item.label}
+            label={item.label}
+            value={item.value}
+            hint={item.hint}
+            ok={item.ok}
+          />
+        ))}
+      </section>
+
+      <section
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
+          gap: 16,
+          marginBottom: 16,
+        }}
+      >
+        <Section title="现在最重要的事" hint="如果你只想知道项目现在卡在哪，就看这里。">
+          <div style={{ display: "grid", gap: 10, fontSize: 14, color: "#cbd5e1" }}>
+            <div>API：{health.ok ? "能通" : `异常 - ${health.detail || "待检查"}`}</div>
+            <div>数据库：{summary.database_configured ? "已接入" : "未接入"}</div>
+            <div>R2：{summary.storage_configured ? `已接入（${summary.bucket || "未命名"}）` : "未接入"}</div>
+            <div>最新任务：{summary.latest_task?.title || "还没有任务"}</div>
+            <div>最新 Worker：{summary.latest_worker?.display_name || "还没有节点"}</div>
+          </div>
+        </Section>
+
+        <Section title="任务概况" hint="一眼看清任务队列，不用翻大表。">
+          <div style={{ display: "grid", gap: 10, fontSize: 14, color: "#cbd5e1" }}>
+            <div>总任务：{taskSummary.total || 0}</div>
+            <div>待处理：{taskSummary.pending || 0}</div>
+            <div>运行中：{taskSummary.running || 0}</div>
+            <div>成功：{taskSummary.success || 0}</div>
+            <div>失败：{taskSummary.failed || 0}</div>
+          </div>
+        </Section>
+
+        <Section title="Worker 概况" hint="先看在线数量，再看有没有节点超时。">
+          <div style={{ display: "grid", gap: 10, fontSize: 14, color: "#cbd5e1" }}>
+            <div>节点总数：{workerSummary.total || 0}</div>
+            <div>在线：{workerSummary.online || 0}</div>
+            <div>离线：{workerSummary.offline || 0}</div>
+            <div>
+              最新节点：
+              {workerSummary.latest?.display_name || "暂无"}
+              {workerSummary.latest?.is_timed_out ? "（心跳超时）" : ""}
+            </div>
+          </div>
+        </Section>
+      </section>
+
+      <section
+        id="tasks"
+        style={{
+          display: "grid",
+          gridTemplateColumns: "minmax(340px, 420px) minmax(0, 1fr)",
+          gap: 16,
+          marginBottom: 16,
+        }}
+      >
+        <Section title="第 1 步：创建任务" hint="先填标题、来源和链接，别一上来就碰复杂参数。">
+          <form onSubmit={createTask} style={{ display: "grid", gap: 12 }}>
+            <input
+              style={inputStyle}
+              value={taskForm.title}
+              onChange={(event) => setTaskForm((prev) => ({ ...prev, title: event.target.value }))}
+              placeholder="任务标题，例如：YouTube 采集 + 上传 TikTok"
+            />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <input
+                style={inputStyle}
+                value={taskForm.source_type}
+                onChange={(event) => setTaskForm((prev) => ({ ...prev, source_type: event.target.value }))}
+                placeholder="来源类型，例如 youtube"
+              />
+              <input
+                style={inputStyle}
+                value={taskForm.priority}
+                onChange={(event) => setTaskForm((prev) => ({ ...prev, priority: event.target.value }))}
+                placeholder="优先级，例如 high"
+              />
+            </div>
+            <input
+              style={inputStyle}
+              value={taskForm.source_value}
+              onChange={(event) => setTaskForm((prev) => ({ ...prev, source_value: event.target.value }))}
+              placeholder="来源地址，例如 YouTube 链接"
+            />
+            <textarea
+              style={{ ...inputStyle, minHeight: 120, resize: "vertical" }}
+              value={taskForm.payload}
+              onChange={(event) => setTaskForm((prev) => ({ ...prev, payload: event.target.value }))}
+              placeholder="高级参数 JSON，可先不动"
+            />
+            <button style={buttonStyle} disabled={busy === "task"}>
+              {busy === "task" ? "创建中..." : "创建任务"}
+            </button>
+          </form>
+        </Section>
+
+        <Section
+          title="第 2 步：看任务队列"
+          hint="这里只保留最关键的几列：状态、分配给谁、能不能重试。"
+          action={
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <input
+                style={{ ...inputStyle, width: 160 }}
+                value={taskFilter}
+                onChange={(event) => setTaskFilter(event.target.value)}
+                placeholder="按状态过滤"
+              />
+              <button
+                type="button"
+                style={buttonStyle}
+                onClick={() => {
+                  loadTasks(taskFilter);
+                  loadTaskSummary();
                 }}
               >
-                {label}
-              </a>
-            ))}
+                刷新任务
+              </button>
+            </div>
+          }
+        >
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ textAlign: "left", color: "#94a3b8" }}>
+                  <th style={{ padding: "10px 8px", width: 70 }}>ID</th>
+                  <th style={{ padding: "10px 8px" }}>任务</th>
+                  <th style={{ padding: "10px 8px", width: 130 }}>状态</th>
+                  <th style={{ padding: "10px 8px", width: 160 }}>Worker</th>
+                  <th style={{ padding: "10px 8px", width: 150 }}>尝试情况</th>
+                  <th style={{ padding: "10px 8px", width: 220 }}>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tasks.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} style={{ padding: "14px 8px", color: "#94a3b8", borderTop: "1px solid #26314f" }}>
+                      现在还没有任务。
+                    </td>
+                  </tr>
+                ) : (
+                  tasks.map((item) => (
+                    <tr key={item.id}>
+                      <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>{item.id}</td>
+                      <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
+                        <div>{item.title}</div>
+                        <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
+                          {item.source_type} / {item.source_value || "-"}
+                        </div>
+                      </td>
+                      <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
+                        <select
+                          style={inputStyle}
+                          value={taskDrafts[item.id]?.status ?? item.status}
+                          onChange={(event) => updateTaskDraft(item.id, "status", event.target.value)}
+                        >
+                          {taskStatusOptions.map((status) => (
+                            <option key={status} value={status}>
+                              {status}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
+                        <select
+                          style={inputStyle}
+                          value={taskDrafts[item.id]?.assigned_worker_code ?? item.assigned_worker_code ?? ""}
+                          onChange={(event) =>
+                            updateTaskDraft(item.id, "assigned_worker_code", event.target.value)
+                          }
+                        >
+                          <option value="">未分配</option>
+                          {workers.map((worker) => (
+                            <option key={worker.worker_code} value={worker.worker_code}>
+                              {worker.display_name}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
+                        <div>尝试 {item.attempt_count || 0}</div>
+                        <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
+                          重试 {item.retry_count || 0}/{item.max_retries || 0}
+                        </div>
+                        {item.last_error ? (
+                          <div style={{ marginTop: 4, fontSize: 12, color: "#fca5a5" }}>{item.last_error}</div>
+                        ) : null}
+                      </td>
+                      <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <button
+                            type="button"
+                            style={buttonStyle}
+                            onClick={() => saveTaskUpdate(item)}
+                            disabled={busy === `task-${item.id}`}
+                          >
+                            {busy === `task-${item.id}` ? "保存中..." : "保存"}
+                          </button>
+                          {["failed", "cancelled", "success"].includes(item.status) ? (
+                            <button
+                              type="button"
+                              style={secondaryButtonStyle}
+                              onClick={() => retryTask(item.id)}
+                              disabled={busy === `retry-${item.id}`}
+                            >
+                              {busy === `retry-${item.id}` ? "重试中..." : "手动重试"}
+                            </button>
+                          ) : null}
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
           </div>
-        </aside>
+        </Section>
+      </section>
 
-        <div style={{ display: "grid", gap: 16 }}>
-          <section id="system">
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
-                gap: 16,
+      <section
+        id="workers"
+        style={{
+          display: "grid",
+          gridTemplateColumns: "minmax(340px, 420px) minmax(0, 1fr)",
+          gap: 16,
+          marginBottom: 16,
+        }}
+      >
+        <Section title="第 3 步：登记 Worker" hint="先把节点登记上来，后面真实 Worker.exe 跑起来会自动更新这里。">
+          <form onSubmit={submitHeartbeat} style={{ display: "grid", gap: 12 }}>
+            <input
+              style={inputStyle}
+              value={workerForm.worker_code}
+              onChange={(event) => setWorkerForm((prev) => ({ ...prev, worker_code: event.target.value }))}
+              placeholder="Worker 编号"
+            />
+            <input
+              style={inputStyle}
+              value={workerForm.display_name}
+              onChange={(event) => setWorkerForm((prev) => ({ ...prev, display_name: event.target.value }))}
+              placeholder="显示名称"
+            />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <input
+                style={inputStyle}
+                value={workerForm.status}
+                onChange={(event) => setWorkerForm((prev) => ({ ...prev, status: event.target.value }))}
+                placeholder="状态"
+              />
+              <input
+                style={inputStyle}
+                value={workerForm.current_task_title}
+                onChange={(event) =>
+                  setWorkerForm((prev) => ({ ...prev, current_task_title: event.target.value }))
+                }
+                placeholder="当前任务，可留空"
+              />
+            </div>
+            <input
+              style={inputStyle}
+              value={workerForm.machine_info}
+              onChange={(event) => setWorkerForm((prev) => ({ ...prev, machine_info: event.target.value }))}
+              placeholder="机器信息"
+            />
+            <input
+              style={inputStyle}
+              value={workerForm.capabilities}
+              onChange={(event) => setWorkerForm((prev) => ({ ...prev, capabilities: event.target.value }))}
+              placeholder="能力，逗号分隔"
+            />
+            <textarea
+              style={{ ...inputStyle, minHeight: 100, resize: "vertical" }}
+              value={workerForm.heartbeat_note}
+              onChange={(event) => setWorkerForm((prev) => ({ ...prev, heartbeat_note: event.target.value }))}
+              placeholder="备注"
+            />
+            <button style={buttonStyle} disabled={busy === "worker"}>
+              {busy === "worker" ? "提交中..." : "提交 Worker 心跳"}
+            </button>
+          </form>
+        </Section>
+
+        <Section
+          title="第 4 步：看 Worker 是否在线"
+          hint="只看你最关心的 5 列，不再把技术细节堆满一屏。"
+          action={
+            <button
+              type="button"
+              style={buttonStyle}
+              onClick={() => {
+                loadWorkers();
+                loadWorkerSummary();
               }}
             >
-              {statCards.map((item) => (
-                <div key={item.title} style={cardStyle}>
-                  <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 10 }}>{item.title}</div>
-                  <div style={{ fontSize: 28, fontWeight: 700, marginBottom: 8 }}>{item.value}</div>
-                  <StatusBadge ok={item.ok} text={item.hint} />
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))",
-              gap: 16,
-            }}
-          >
-            <div style={cardStyle}>
-              <SectionHeader
-                title="系统状态"
-                hint="当前接入的是 Railway 的 api / Postgres / Redis / R2 组合。"
-              />
-              <div style={{ display: "grid", gap: 10, fontSize: 13, color: "#cbd5e1" }}>
-                <div>健康检查：{health.detail || "等待结果"}</div>
-                <div>Bucket：{summary.bucket || "未配置"}</div>
-                <div>最新资产：{summary.latest_asset_record?.key || "暂无"}</div>
-                <div>最新任务：{summary.latest_task?.title || "暂无"}</div>
-                <div>最新 Worker：{summary.latest_worker?.display_name || "暂无"}</div>
-              </div>
-            </div>
-
-            <div style={cardStyle}>
-              <SectionHeader title="任务概览" hint="任务表已经接上数据库，可先用它做任务中心骨架。" />
-              <div style={{ display: "grid", gap: 10, fontSize: 13, color: "#cbd5e1" }}>
-                <div>总任务数：{taskSummary.total || 0}</div>
-                <div>待处理：{taskSummary.pending || 0}</div>
-                <div>运行中：{taskSummary.running || 0}</div>
-                <div>成功：{taskSummary.success || 0}</div>
-                <div>失败：{taskSummary.failed || 0}</div>
-                <div>最新任务：{taskSummary.latest?.title || "暂无"}</div>
-              </div>
-            </div>
-
-            <div style={cardStyle}>
-              <SectionHeader title="Worker 概览" hint="节点页先走心跳模式，后面再接真实 Worker.exe。" />
-              <div style={{ display: "grid", gap: 10, fontSize: 13, color: "#cbd5e1" }}>
-                <div>总节点数：{workerSummary.total || 0}</div>
-                <div>在线：{workerSummary.online || 0}</div>
-                <div>离线：{workerSummary.offline || 0}</div>
-                <div>最新节点：{workerSummary.latest?.display_name || "暂无"}</div>
-                <div>
-                  节点状态：{workerSummary.latest?.status || "-"}
-                  {workerSummary.latest?.is_timed_out ? "（心跳超时）" : ""}
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section
-            id="upload"
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
-              gap: 16,
-            }}
-          >
-            <form style={cardStyle} onSubmit={uploadText}>
-              <SectionHeader title="文本上传" hint="快速向 R2 写入文案、字幕、JSON 等小文件。" />
-              <div style={{ display: "grid", gap: 12 }}>
-                <input
-                  style={inputStyle}
-                  value={textPrefix}
-                  onChange={(event) => setTextPrefix(event.target.value)}
-                  placeholder="prefix，例如 assets"
-                />
-                <input
-                  style={inputStyle}
-                  value={textFilename}
-                  onChange={(event) => setTextFilename(event.target.value)}
-                  placeholder="文件名，可留空自动生成"
-                />
-                <textarea
-                  style={{ ...inputStyle, minHeight: 140, resize: "vertical" }}
-                  value={textBody}
-                  onChange={(event) => setTextBody(event.target.value)}
-                />
-                <button style={buttonStyle} disabled={busy === "text"}>
-                  {busy === "text" ? "上传中..." : "上传文本到 R2"}
-                </button>
-              </div>
-            </form>
-
-            <form style={cardStyle} onSubmit={uploadFile}>
-              <SectionHeader title="文件上传" hint="后面可直接复用给素材、封面、字幕包上传。" />
-              <div style={{ display: "grid", gap: 12 }}>
-                <input
-                  style={inputStyle}
-                  value={filePrefix}
-                  onChange={(event) => setFilePrefix(event.target.value)}
-                  placeholder="prefix，例如 assets"
-                />
-                <input
-                  type="file"
-                  style={inputStyle}
-                  onChange={(event) => setSelectedFile(event.target.files?.[0] || null)}
-                />
-                <div style={{ fontSize: 12, color: "#94a3b8" }}>
-                  {selectedFile ? `已选择：${selectedFile.name}` : "请选择一个本地文件上传到 R2"}
-                </div>
-                <button style={buttonStyle} disabled={busy === "file"}>
-                  {busy === "file" ? "上传中..." : "上传文件到 R2"}
-                </button>
-              </div>
-            </form>
-          </section>
-
-          <section
-            id="tasks"
-            style={{
-              display: "grid",
-              gridTemplateColumns: "minmax(360px, 420px) minmax(0, 1fr)",
-              gap: 16,
-            }}
-          >
-            <form style={cardStyle} onSubmit={createTask}>
-              <SectionHeader title="任务中心" hint="先从手工建任务开始，后面再接员工工作台和发布编排。" />
-              <div style={{ display: "grid", gap: 12 }}>
-                <input
-                  style={inputStyle}
-                  value={taskForm.title}
-                  onChange={(event) => setTaskForm((prev) => ({ ...prev, title: event.target.value }))}
-                  placeholder="任务标题"
-                />
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                  <input
-                    style={inputStyle}
-                    value={taskForm.task_type}
-                    onChange={(event) =>
-                      setTaskForm((prev) => ({ ...prev, task_type: event.target.value }))
-                    }
-                    placeholder="task_type"
-                  />
-                  <input
-                    style={inputStyle}
-                    value={taskForm.priority}
-                    onChange={(event) =>
-                      setTaskForm((prev) => ({ ...prev, priority: event.target.value }))
-                    }
-                    placeholder="priority"
-                  />
-                </div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                  <input
-                    style={inputStyle}
-                    value={taskForm.source_type}
-                    onChange={(event) =>
-                      setTaskForm((prev) => ({ ...prev, source_type: event.target.value }))
-                    }
-                    placeholder="source_type"
-                  />
-                  <input
-                    style={inputStyle}
-                    value={taskForm.source_value}
-                    onChange={(event) =>
-                      setTaskForm((prev) => ({ ...prev, source_value: event.target.value }))
-                    }
-                    placeholder="source_value"
-                  />
-                </div>
-                <textarea
-                  style={{ ...inputStyle, minHeight: 130, resize: "vertical" }}
-                  value={taskForm.payload}
-                  onChange={(event) => setTaskForm((prev) => ({ ...prev, payload: event.target.value }))}
-                  placeholder="任务 payload JSON"
-                />
-                <button style={buttonStyle} disabled={busy === "task"}>
-                  {busy === "task" ? "创建中..." : "创建任务"}
-                </button>
-              </div>
-            </form>
-
-            <div style={cardStyle}>
-              <SectionHeader
-                title="任务列表"
-                hint="这里先看数据库任务，后面再接任务详情页和状态机。"
-                action={
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    <input
-                      style={{ ...inputStyle, width: 180 }}
-                      value={taskFilter}
-                      onChange={(event) => setTaskFilter(event.target.value)}
-                      placeholder="按状态过滤，如 pending"
-                    />
-                    <button
-                      style={buttonStyle}
-                      onClick={() => {
-                        loadTasks(taskFilter);
-                        loadTaskSummary();
-                      }}
-                    >
-                      刷新任务
-                    </button>
-                  </div>
-                }
-              />
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ textAlign: "left", color: "#94a3b8" }}>
-                      <th style={{ padding: "10px 8px", width: 60 }}>ID</th>
-                      <th style={{ padding: "10px 8px" }}>标题</th>
-                      <th style={{ padding: "10px 8px", width: 100 }}>类型</th>
-                      <th style={{ padding: "10px 8px", width: 140 }}>状态流转</th>
-                      <th style={{ padding: "10px 8px", width: 180 }}>指派 Worker</th>
-                      <th style={{ padding: "10px 8px", width: 120 }}>尝试/重试</th>
-                      <th style={{ padding: "10px 8px", width: 100 }}>优先级</th>
-                      <th style={{ padding: "10px 8px", width: 180 }}>操作</th>
-                      <th style={{ padding: "10px 8px", width: 180 }}>创建时间</th>
+              刷新节点
+            </button>
+          }
+        >
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr style={{ textAlign: "left", color: "#94a3b8" }}>
+                  <th style={{ padding: "10px 8px" }}>节点</th>
+                  <th style={{ padding: "10px 8px", width: 120 }}>当前状态</th>
+                  <th style={{ padding: "10px 8px" }}>当前任务</th>
+                  <th style={{ padding: "10px 8px" }}>备注</th>
+                  <th style={{ padding: "10px 8px", width: 170 }}>最近心跳</th>
+                </tr>
+              </thead>
+              <tbody>
+                {workers.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} style={{ padding: "14px 8px", color: "#94a3b8", borderTop: "1px solid #26314f" }}>
+                      现在还没有 Worker 节点。
+                    </td>
+                  </tr>
+                ) : (
+                  workers.map((item) => (
+                    <tr key={item.id}>
+                      <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
+                        <div>{item.display_name}</div>
+                        <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>{item.worker_code}</div>
+                      </td>
+                      <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
+                        {item.status}
+                        {item.is_timed_out ? (
+                          <div style={{ marginTop: 4, fontSize: 12, color: "#fca5a5" }}>心跳超时</div>
+                        ) : null}
+                      </td>
+                      <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
+                        {item.current_task_title || "-"}
+                      </td>
+                      <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
+                        {item.heartbeat_note || "-"}
+                      </td>
+                      <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
+                        {formatDate(item.last_heartbeat_at)}
+                      </td>
                     </tr>
-                  </thead>
-                  <tbody>
-                    {tasks.length === 0 ? (
-                      <tr>
-                        <td
-                          colSpan={8}
-                          style={{ padding: "14px 8px", color: "#94a3b8", borderTop: "1px solid #26314f" }}
-                        >
-                          当前没有任务记录。
-                        </td>
-                      </tr>
-                    ) : (
-                      tasks.map((item) => (
-                        <tr key={item.id}>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>{item.id}</td>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
-                            <div>{item.title}</div>
-                            <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
-                              {item.source_type} / {item.source_value || "-"}
-                            </div>
-                          </td>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>{item.task_type}</td>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
-                            <select
-                              style={inputStyle}
-                              value={taskDrafts[item.id]?.status ?? item.status}
-                              onChange={(event) => updateTaskDraft(item.id, "status", event.target.value)}
-                            >
-                              {taskStatusOptions.map((status) => (
-                                <option key={status} value={status}>
-                                  {status}
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
-                            <select
-                              style={inputStyle}
-                              value={taskDrafts[item.id]?.assigned_worker_code ?? item.assigned_worker_code ?? ""}
-                              onChange={(event) =>
-                                updateTaskDraft(item.id, "assigned_worker_code", event.target.value)
-                              }
-                            >
-                              <option value="">未指派</option>
-                              {workers.map((worker) => (
-                                <option key={worker.worker_code} value={worker.worker_code}>
-                                  {worker.display_name} ({worker.status})
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
-                            <div>尝试 {item.attempt_count || 0}</div>
-                            <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
-                              重试 {item.retry_count || 0}/{item.max_retries || 0}
-                            </div>
-                            {item.last_error ? (
-                              <div style={{ marginTop: 4, fontSize: 12, color: "#fca5a5" }}>
-                                {item.last_error}
-                              </div>
-                            ) : null}
-                          </td>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>{item.priority}</td>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
-                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                              <button
-                                style={buttonStyle}
-                                onClick={() => saveTaskUpdate(item)}
-                                disabled={busy === `task-${item.id}`}
-                              >
-                                {busy === `task-${item.id}` ? "保存中..." : "保存"}
-                              </button>
-                              {["failed", "cancelled", "success"].includes(item.status) ? (
-                                <button
-                                  style={secondaryButtonStyle}
-                                  onClick={() => retryTask(item.id)}
-                                  disabled={busy === `task-retry-${item.id}`}
-                                >
-                                  {busy === `task-retry-${item.id}` ? "重试中..." : "手动重试"}
-                                </button>
-                              ) : null}
-                            </div>
-                          </td>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
-                            {formatDate(item.created_at)}
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </section>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </Section>
+      </section>
 
-          <section
-            id="workers"
-            style={{
-              display: "grid",
-              gridTemplateColumns: "minmax(360px, 420px) minmax(0, 1fr)",
-              gap: 16,
-            }}
-          >
-            <form style={cardStyle} onSubmit={submitHeartbeat}>
-              <SectionHeader title="Worker 节点页" hint="这一步先模拟 Worker 心跳，后面再接真实 exe。" />
-              <div style={{ display: "grid", gap: 12 }}>
-                <input
-                  style={inputStyle}
-                  value={workerForm.worker_code}
-                  onChange={(event) =>
-                    setWorkerForm((prev) => ({ ...prev, worker_code: event.target.value }))
-                  }
-                  placeholder="worker_code"
-                />
-                <input
-                  style={inputStyle}
-                  value={workerForm.display_name}
-                  onChange={(event) =>
-                    setWorkerForm((prev) => ({ ...prev, display_name: event.target.value }))
-                  }
-                  placeholder="display_name"
-                />
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                  <input
-                    style={inputStyle}
-                    value={workerForm.status}
-                    onChange={(event) =>
-                      setWorkerForm((prev) => ({ ...prev, status: event.target.value }))
-                    }
-                    placeholder="status"
-                  />
-                  <input
-                    style={inputStyle}
-                    value={workerForm.current_task_title}
-                    onChange={(event) =>
-                      setWorkerForm((prev) => ({ ...prev, current_task_title: event.target.value }))
-                    }
-                    placeholder="current_task_title"
-                  />
-                </div>
-                <input
-                  style={inputStyle}
-                  value={workerForm.machine_info}
-                  onChange={(event) =>
-                    setWorkerForm((prev) => ({ ...prev, machine_info: event.target.value }))
-                  }
-                  placeholder="machine_info"
-                />
-                <input
-                  style={inputStyle}
-                  value={workerForm.capabilities}
-                  onChange={(event) =>
-                    setWorkerForm((prev) => ({ ...prev, capabilities: event.target.value }))
-                  }
-                  placeholder="capabilities，逗号分隔"
-                />
-                <textarea
-                  style={{ ...inputStyle, minHeight: 110, resize: "vertical" }}
-                  value={workerForm.heartbeat_note}
-                  onChange={(event) =>
-                    setWorkerForm((prev) => ({ ...prev, heartbeat_note: event.target.value }))
-                  }
-                  placeholder="heartbeat_note"
-                />
-                <button style={buttonStyle} disabled={busy === "worker"}>
-                  {busy === "worker" ? "提交中..." : "提交 Worker 心跳"}
-                </button>
-              </div>
+      <section id="storage" style={{ display: "grid", gap: 16, marginBottom: 16 }}>
+        <details style={cardStyle} open>
+          <summary style={{ cursor: "pointer", fontSize: 16, fontWeight: 600 }}>
+            文件与存储
+          </summary>
+          <div style={{ marginTop: 14, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16 }}>
+            <form onSubmit={uploadText} style={{ display: "grid", gap: 12 }}>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>上传一段文本到 R2</div>
+              <input
+                style={inputStyle}
+                value={textPrefix}
+                onChange={(event) => setTextPrefix(event.target.value)}
+                placeholder="prefix，例如 assets"
+              />
+              <input
+                style={inputStyle}
+                value={textFilename}
+                onChange={(event) => setTextFilename(event.target.value)}
+                placeholder="文件名，可留空"
+              />
+              <textarea
+                style={{ ...inputStyle, minHeight: 120, resize: "vertical" }}
+                value={textBody}
+                onChange={(event) => setTextBody(event.target.value)}
+              />
+              <button style={buttonStyle} disabled={busy === "text"}>
+                {busy === "text" ? "上传中..." : "上传文本"}
+              </button>
             </form>
 
-            <div style={cardStyle}>
-              <SectionHeader
-                title="Worker 节点列表"
-                hint="后面可以在这里继续补心跳超时、占用状态、版本号和升级控制。"
-                action={
-                  <button style={buttonStyle} onClick={() => {
-                    loadWorkers();
-                    loadWorkerSummary();
-                  }}>
-                    刷新节点
-                  </button>
-                }
+            <form onSubmit={uploadFile} style={{ display: "grid", gap: 12 }}>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>上传一个本地文件到 R2</div>
+              <input
+                style={inputStyle}
+                value={filePrefix}
+                onChange={(event) => setFilePrefix(event.target.value)}
+                placeholder="prefix，例如 assets"
               />
-              <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                  <thead>
-                    <tr style={{ textAlign: "left", color: "#94a3b8" }}>
-                      <th style={{ padding: "10px 8px", width: 130 }}>Worker</th>
-                      <th style={{ padding: "10px 8px", width: 100 }}>状态</th>
-                      <th style={{ padding: "10px 8px", width: 120 }}>上报状态</th>
-                      <th style={{ padding: "10px 8px" }}>能力</th>
-                      <th style={{ padding: "10px 8px" }}>当前任务</th>
-                      <th style={{ padding: "10px 8px" }}>心跳备注</th>
-                      <th style={{ padding: "10px 8px", width: 180 }}>心跳时间</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {workers.length === 0 ? (
-                      <tr>
-                        <td
-                          colSpan={7}
-                          style={{ padding: "14px 8px", color: "#94a3b8", borderTop: "1px solid #26314f" }}
-                        >
-                          当前还没有 Worker 节点记录。
-                        </td>
-                      </tr>
-                    ) : (
-                      workers.map((item) => (
-                        <tr key={item.id}>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
-                            <div>{item.display_name}</div>
-                            <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
-                              {item.worker_code}
-                            </div>
-                          </td>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
-                            {item.status}
-                            {item.is_timed_out ? (
-                              <div style={{ marginTop: 4, fontSize: 12, color: "#fca5a5" }}>心跳超时</div>
-                            ) : null}
-                          </td>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>{item.reported_status}</td>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
-                            {(item.capabilities || []).join(", ") || "-"}
-                          </td>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
-                            {item.current_task_title || "-"}
-                          </td>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
-                            {item.heartbeat_note || "-"}
-                          </td>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
-                            {formatDate(item.last_heartbeat_at)}
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
+              <input
+                type="file"
+                style={inputStyle}
+                onChange={(event) => setSelectedFile(event.target.files?.[0] || null)}
+              />
+              <div style={{ fontSize: 12, color: "#94a3b8" }}>
+                {selectedFile ? `已选择：${selectedFile.name}` : "请选择一个文件"}
               </div>
-            </div>
-          </section>
+              <button style={buttonStyle} disabled={busy === "file"}>
+                {busy === "file" ? "上传中..." : "上传文件"}
+              </button>
+            </form>
+          </div>
+        </details>
 
-          <section id="assets" style={cardStyle}>
-            <SectionHeader
-              title="R2 对象列表"
-              hint="查看指定前缀下的对象，并生成预览下载链接。"
-              action={
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <input
-                    style={{ ...inputStyle, width: 220 }}
-                    value={listPrefix}
-                    onChange={(event) => setListPrefix(event.target.value)}
-                    placeholder="prefix"
-                  />
-                  <button
-                    style={buttonStyle}
-                    onClick={() => {
-                      loadAssets(listPrefix);
-                      loadRecords(listPrefix);
-                    }}
-                  >
-                    刷新列表
-                  </button>
-                </div>
-              }
-            />
-            <div style={{ marginTop: 16, overflowX: "auto" }}>
+        <details style={cardStyle}>
+          <summary style={{ cursor: "pointer", fontSize: 16, fontWeight: 600 }}>
+            文件结果与数据库记录
+          </summary>
+          <div style={{ marginTop: 14, display: "grid", gap: 16 }}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <input
+                style={{ ...inputStyle, width: 220 }}
+                value={listPrefix}
+                onChange={(event) => setListPrefix(event.target.value)}
+                placeholder="prefix"
+              />
+              <button
+                type="button"
+                style={buttonStyle}
+                onClick={() => {
+                  loadAssets(listPrefix);
+                  loadRecords(listPrefix);
+                }}
+              >
+                刷新结果
+              </button>
+            </div>
+
+            <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                 <thead>
                   <tr style={{ textAlign: "left", color: "#94a3b8" }}>
-                    <th style={{ padding: "10px 8px" }}>Key</th>
+                    <th style={{ padding: "10px 8px" }}>R2 文件</th>
                     <th style={{ padding: "10px 8px", width: 120 }}>大小</th>
-                    <th style={{ padding: "10px 8px", width: 220 }}>更新时间</th>
+                    <th style={{ padding: "10px 8px", width: 180 }}>时间</th>
                     <th style={{ padding: "10px 8px", width: 120 }}>操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   {assets.length === 0 ? (
                     <tr>
-                      <td
-                        colSpan={4}
-                        style={{ padding: "14px 8px", color: "#94a3b8", borderTop: "1px solid #26314f" }}
-                      >
-                        当前前缀下暂无对象。
+                      <td colSpan={4} style={{ padding: "14px 8px", color: "#94a3b8", borderTop: "1px solid #26314f" }}>
+                        当前前缀下还没有文件。
                       </td>
                     </tr>
                   ) : (
                     assets.map((item) => (
                       <tr key={item.key}>
-                        <td
-                          style={{
-                            padding: "12px 8px",
-                            borderTop: "1px solid #26314f",
-                            wordBreak: "break-all",
-                          }}
-                        >
+                        <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f", wordBreak: "break-all" }}>
                           {item.key}
                         </td>
                         <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>{item.size}</td>
-                        <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
-                          {formatDate(item.last_modified)}
-                        </td>
+                        <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>{formatDate(item.last_modified)}</td>
                         <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
                           <button
+                            type="button"
                             style={buttonStyle}
                             onClick={() => createPreviewLink(item.key)}
-                            disabled={busy === item.key}
+                            disabled={busy === `preview-${item.key}`}
                           >
-                            {busy === item.key ? "生成中..." : "预览"}
+                            预览
                           </button>
                         </td>
                       </tr>
@@ -1122,16 +1021,7 @@ export default function HomePage() {
                 </tbody>
               </table>
             </div>
-          </section>
 
-          <section id="records" style={cardStyle}>
-            <SectionHeader
-              title="数据库上传记录"
-              hint="这里显示 Postgres 里的 asset_records，可继续扩成审计日志或发布记录。"
-            />
-            <div style={{ marginBottom: 12, fontSize: 12, color: "#94a3b8" }}>
-              当前前缀：{listPrefix} | 最近对象：{latestAsset?.key || "暂无"}
-            </div>
             <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
                 <thead>
@@ -1141,17 +1031,13 @@ export default function HomePage() {
                     <th style={{ padding: "10px 8px" }}>Key</th>
                     <th style={{ padding: "10px 8px", width: 120 }}>大小</th>
                     <th style={{ padding: "10px 8px", width: 120 }}>状态</th>
-                    <th style={{ padding: "10px 8px", width: 220 }}>创建时间</th>
                   </tr>
                 </thead>
                 <tbody>
                   {records.length === 0 ? (
                     <tr>
-                      <td
-                        colSpan={6}
-                        style={{ padding: "14px 8px", color: "#94a3b8", borderTop: "1px solid #26314f" }}
-                      >
-                        当前前缀下暂无数据库记录。
+                      <td colSpan={5} style={{ padding: "14px 8px", color: "#94a3b8", borderTop: "1px solid #26314f" }}>
+                        当前还没有数据库记录。
                       </td>
                     </tr>
                   ) : (
@@ -1159,36 +1045,22 @@ export default function HomePage() {
                       <tr key={item.id}>
                         <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>{item.id}</td>
                         <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>{item.source_type}</td>
-                        <td
-                          style={{
-                            padding: "12px 8px",
-                            borderTop: "1px solid #26314f",
-                            wordBreak: "break-all",
-                          }}
-                        >
-                          {item.key}
-                        </td>
-                        <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
-                          {item.size_bytes}
-                        </td>
+                        <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f", wordBreak: "break-all" }}>{item.key}</td>
+                        <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>{item.size_bytes}</td>
                         <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>{item.status}</td>
-                        <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
-                          {formatDate(item.created_at)}
-                        </td>
                       </tr>
                     ))
                   )}
                 </tbody>
               </table>
             </div>
-          </section>
-
-          <section style={cardStyle}>
-            <SectionHeader title="当前消息" hint="这里会显示最近一次动作、接口报错或刷新结果。" />
-            <div style={{ fontSize: 13, color: "#e2e8f0", wordBreak: "break-word" }}>{message}</div>
-          </section>
-        </div>
+          </div>
+        </details>
       </section>
+
+      <Section title="当前消息" hint="最后一次操作结果，会在这里显示。">
+        <div style={{ fontSize: 14, color: "#e2e8f0", wordBreak: "break-word" }}>{message}</div>
+      </Section>
     </main>
   );
 }
