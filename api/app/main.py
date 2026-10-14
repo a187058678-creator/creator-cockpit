@@ -2,6 +2,7 @@ import os
 import json
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import boto3
@@ -9,7 +10,7 @@ from botocore.client import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import desc, func, select
+from sqlalchemy import case, desc, func, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db, init_db
@@ -50,6 +51,28 @@ class WorkerHeartbeatRequest(BaseModel):
     heartbeat_note: str = ""
 
 
+class UpdateTaskRequest(BaseModel):
+    status: Optional[str] = None
+    assigned_worker_code: Optional[str] = None
+    result: Optional[dict] = None
+
+
+class WorkerTaskClaimRequest(BaseModel):
+    worker_code: str
+
+
+class WorkerTaskCompleteRequest(BaseModel):
+    worker_code: str
+    result: dict = {}
+
+
+class WorkerTaskFailRequest(BaseModel):
+    worker_code: str
+    error_message: str
+    retryable: bool = True
+    result: dict = {}
+
+
 def get_required_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
@@ -70,6 +93,14 @@ def get_s3_client():
 
 def get_bucket_name() -> str:
     return get_required_env("S3_BUCKET")
+
+
+def get_worker_offline_timeout_seconds() -> int:
+    raw_value = os.getenv("WORKER_OFFLINE_TIMEOUT_SECONDS", "180")
+    try:
+        return max(30, int(raw_value))
+    except ValueError:
+        return 180
 
 
 def build_object_url(key: str) -> str:
@@ -126,7 +157,45 @@ def serialize_asset_record(record: AssetRecord):
     }
 
 
+def load_json_field(raw_value: str, fallback):
+    try:
+        return json.loads(raw_value or "")
+    except json.JSONDecodeError:
+        return fallback
+
+
+def utcnow():
+    return datetime.now(timezone.utc)
+
+
+def iso_now():
+    return utcnow().isoformat()
+
+
+def get_task_runtime_state(record: TaskRecord):
+    state = load_json_field(record.result_json, {})
+    state.setdefault("attempt_count", 0)
+    state.setdefault("retry_count", 0)
+    state.setdefault("manual_retry_count", 0)
+    state.setdefault("max_retries", 2)
+    state.setdefault("last_error", "")
+    state.setdefault("history", [])
+    return state
+
+
+def save_task_runtime_state(record: TaskRecord, state: dict):
+    record.result_json = json.dumps(state, ensure_ascii=False)
+
+
+def append_task_history(state: dict, event: str, **extra):
+    history = state.setdefault("history", [])
+    history.append({"event": event, "at": iso_now(), **extra})
+    if len(history) > 20:
+        del history[:-20]
+
+
 def serialize_task_record(record: TaskRecord):
+    runtime_state = get_task_runtime_state(record)
     return {
         "id": record.id,
         "title": record.title,
@@ -137,26 +206,70 @@ def serialize_task_record(record: TaskRecord):
         "priority": record.priority,
         "assigned_worker_code": record.assigned_worker_code,
         "payload": json.loads(record.payload_json or "{}"),
-        "result": json.loads(record.result_json or "{}"),
+        "result": runtime_state,
+        "attempt_count": runtime_state.get("attempt_count", 0),
+        "retry_count": runtime_state.get("retry_count", 0),
+        "manual_retry_count": runtime_state.get("manual_retry_count", 0),
+        "max_retries": runtime_state.get("max_retries", 2),
+        "last_error": runtime_state.get("last_error", ""),
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,
     }
 
 
+def get_effective_worker_status(record: WorkerNode) -> str:
+    if not record.last_heartbeat_at:
+        return "offline"
+
+    heartbeat_at = record.last_heartbeat_at
+    if heartbeat_at.tzinfo is None:
+        heartbeat_at = heartbeat_at.replace(tzinfo=timezone.utc)
+
+    timeout_at = heartbeat_at + timedelta(seconds=get_worker_offline_timeout_seconds())
+    now = datetime.now(timezone.utc)
+    if timeout_at < now:
+        return "offline"
+    return record.status
+
+
 def serialize_worker_node(record: WorkerNode):
+    effective_status = get_effective_worker_status(record)
     return {
         "id": record.id,
         "worker_code": record.worker_code,
         "display_name": record.display_name,
-        "status": record.status,
+        "status": effective_status,
+        "reported_status": record.status,
         "machine_info": record.machine_info,
         "capabilities": json.loads(record.capabilities or "[]"),
         "current_task_title": record.current_task_title,
         "heartbeat_note": record.heartbeat_note,
         "last_heartbeat_at": record.last_heartbeat_at.isoformat() if record.last_heartbeat_at else None,
+        "is_timed_out": effective_status == "offline" and record.status != "offline",
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,
     }
+
+
+def set_worker_idle_if_online(record: WorkerNode, note: str):
+    record.current_task_title = ""
+    if get_effective_worker_status(record) != "offline":
+        record.status = "idle"
+    record.heartbeat_note = note
+
+
+def get_worker_or_404(db: Session, worker_code: str) -> WorkerNode:
+    record = db.scalar(select(WorkerNode).where(WorkerNode.worker_code == worker_code))
+    if not record:
+        raise HTTPException(status_code=404, detail="指定的 Worker 不存在")
+    return record
+
+
+def get_task_or_404(db: Session, task_id: int) -> TaskRecord:
+    record = db.scalar(select(TaskRecord).where(TaskRecord.id == task_id))
+    if not record:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return record
 
 
 @app.get("/health")
@@ -173,11 +286,12 @@ def dashboard_summary(db: Session = Depends(get_db)):
     pending_tasks = db.scalar(
         select(func.count()).select_from(TaskRecord).where(TaskRecord.status.in_(["pending", "queued"]))
     ) or 0
-    online_workers = db.scalar(
-        select(func.count()).select_from(WorkerNode).where(WorkerNode.status.in_(["idle", "running", "online"]))
-    ) or 0
+    worker_items = db.scalars(select(WorkerNode).order_by(desc(WorkerNode.id))).all()
+    online_workers = len(
+        [item for item in worker_items if get_effective_worker_status(item) in ["idle", "running", "online"]]
+    )
     latest_task = db.scalar(select(TaskRecord).order_by(desc(TaskRecord.id)).limit(1))
-    latest_worker = db.scalar(select(WorkerNode).order_by(desc(WorkerNode.id)).limit(1))
+    latest_worker = worker_items[0] if worker_items else None
     return {
         "ok": True,
         "bucket": os.getenv("S3_BUCKET"),
@@ -393,6 +507,15 @@ def delete_asset(key: str, db: Session = Depends(get_db)):
 
 @app.post("/tasks")
 def create_task(payload: CreateTaskRequest, db: Session = Depends(get_db)):
+    runtime_state = {
+        "attempt_count": 0,
+        "retry_count": 0,
+        "manual_retry_count": 0,
+        "max_retries": int(payload.payload.get("max_retries", 2)) if isinstance(payload.payload, dict) else 2,
+        "last_error": "",
+        "history": [],
+    }
+    append_task_history(runtime_state, "created", source_type=payload.source_type)
     record = TaskRecord(
         title=payload.title,
         task_type=payload.task_type,
@@ -401,7 +524,7 @@ def create_task(payload: CreateTaskRequest, db: Session = Depends(get_db)):
         status="pending",
         priority=payload.priority,
         payload_json=json.dumps(payload.payload, ensure_ascii=False),
-        result_json="{}",
+        result_json=json.dumps(runtime_state, ensure_ascii=False),
     )
     db.add(record)
     db.commit()
@@ -439,6 +562,9 @@ def tasks_summary(db: Session = Depends(get_db)):
     success = db.scalar(
         select(func.count()).select_from(TaskRecord).where(TaskRecord.status == "success")
     ) or 0
+    failed = db.scalar(
+        select(func.count()).select_from(TaskRecord).where(TaskRecord.status == "failed")
+    ) or 0
     latest = db.scalar(select(TaskRecord).order_by(desc(TaskRecord.id)).limit(1))
     return {
         "ok": True,
@@ -446,6 +572,7 @@ def tasks_summary(db: Session = Depends(get_db)):
         "pending": pending,
         "running": running,
         "success": success,
+        "failed": failed,
         "latest": serialize_task_record(latest) if latest else None,
     }
 
@@ -462,6 +589,7 @@ def worker_heartbeat(payload: WorkerHeartbeatRequest, db: Session = Depends(get_
             capabilities=json.dumps(payload.capabilities, ensure_ascii=False),
             current_task_title=payload.current_task_title,
             heartbeat_note=payload.heartbeat_note,
+            last_heartbeat_at=datetime.now(timezone.utc),
         )
         db.add(record)
     else:
@@ -471,6 +599,7 @@ def worker_heartbeat(payload: WorkerHeartbeatRequest, db: Session = Depends(get_
         record.capabilities = json.dumps(payload.capabilities, ensure_ascii=False)
         record.current_task_title = payload.current_task_title
         record.heartbeat_note = payload.heartbeat_note
+        record.last_heartbeat_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(record)
     return {"ok": True, "item": serialize_worker_node(record)}
@@ -484,14 +613,11 @@ def list_workers(limit: int = Query(20, ge=1, le=100), db: Session = Depends(get
 
 @app.get("/workers/summary")
 def workers_summary(db: Session = Depends(get_db)):
-    total = db.scalar(select(func.count()).select_from(WorkerNode)) or 0
-    online = db.scalar(
-        select(func.count()).select_from(WorkerNode).where(WorkerNode.status.in_(["idle", "running", "online"]))
-    ) or 0
-    offline = db.scalar(
-        select(func.count()).select_from(WorkerNode).where(WorkerNode.status == "offline")
-    ) or 0
-    latest = db.scalar(select(WorkerNode).order_by(desc(WorkerNode.id)).limit(1))
+    items = db.scalars(select(WorkerNode).order_by(desc(WorkerNode.id))).all()
+    total = len(items)
+    online = len([item for item in items if get_effective_worker_status(item) in ["idle", "running", "online"]])
+    offline = total - online
+    latest = items[0] if items else None
     return {
         "ok": True,
         "total": total,
@@ -499,3 +625,193 @@ def workers_summary(db: Session = Depends(get_db)):
         "offline": offline,
         "latest": serialize_worker_node(latest) if latest else None,
     }
+
+
+@app.patch("/tasks/{task_id}")
+def update_task(task_id: int, payload: UpdateTaskRequest, db: Session = Depends(get_db)):
+    record = get_task_or_404(db, task_id)
+
+    previous_worker_code = record.assigned_worker_code
+    worker_record = None
+    if payload.assigned_worker_code is not None:
+        normalized_worker_code = payload.assigned_worker_code.strip()
+        if normalized_worker_code:
+            worker_record = db.scalar(
+                select(WorkerNode).where(WorkerNode.worker_code == normalized_worker_code)
+            )
+            if not worker_record:
+                raise HTTPException(status_code=404, detail="指定的 Worker 不存在")
+            record.assigned_worker_code = normalized_worker_code
+        else:
+            record.assigned_worker_code = ""
+
+    if payload.status is not None:
+        record.status = payload.status.strip() or record.status
+
+    if payload.result is not None:
+        save_task_runtime_state(record, payload.result)
+
+    if previous_worker_code and previous_worker_code != record.assigned_worker_code:
+        previous_worker = db.scalar(select(WorkerNode).where(WorkerNode.worker_code == previous_worker_code))
+        if previous_worker:
+            previous_worker.current_task_title = ""
+            if get_effective_worker_status(previous_worker) != "offline":
+                previous_worker.status = "idle"
+            previous_worker.heartbeat_note = f"已取消任务 #{record.id} 指派"
+
+    assigned_worker = None
+    if record.assigned_worker_code:
+        assigned_worker = db.scalar(
+            select(WorkerNode).where(WorkerNode.worker_code == record.assigned_worker_code)
+        )
+
+    if assigned_worker:
+        if record.status == "running":
+            assigned_worker.status = "running"
+            assigned_worker.current_task_title = record.title
+            assigned_worker.heartbeat_note = f"处理中：任务 #{record.id}"
+        elif record.status in ["success", "failed", "cancelled", "pending", "queued"]:
+            assigned_worker.current_task_title = ""
+            if get_effective_worker_status(assigned_worker) != "offline":
+                assigned_worker.status = "idle"
+            assigned_worker.heartbeat_note = f"最近处理任务 #{record.id} 状态：{record.status}"
+
+    db.commit()
+    db.refresh(record)
+    return {"ok": True, "item": serialize_task_record(record)}
+
+
+@app.post("/worker/tasks/claim")
+def claim_task(payload: WorkerTaskClaimRequest, db: Session = Depends(get_db)):
+    worker = get_worker_or_404(db, payload.worker_code)
+    current_running_task = db.scalar(
+        select(TaskRecord)
+        .where(
+            TaskRecord.assigned_worker_code == payload.worker_code,
+            TaskRecord.status == "running",
+        )
+        .order_by(desc(TaskRecord.id))
+        .limit(1)
+    )
+    if current_running_task:
+        return {"ok": True, "item": serialize_task_record(current_running_task), "reused": True}
+
+    task = db.scalar(
+        select(TaskRecord)
+        .where(
+            TaskRecord.status.in_(["pending", "queued"]),
+        )
+        .order_by(
+            case((TaskRecord.priority == "high", 0), else_=1),
+            TaskRecord.id,
+        )
+        .limit(1)
+    )
+    if not task:
+        if get_effective_worker_status(worker) != "offline":
+            worker.status = "idle"
+            worker.current_task_title = ""
+            worker.heartbeat_note = "暂无可领取任务"
+            db.commit()
+        return {"ok": True, "item": None}
+
+    state = get_task_runtime_state(task)
+    state["attempt_count"] = int(state.get("attempt_count", 0)) + 1
+    state["last_error"] = ""
+    append_task_history(state, "claimed", worker_code=payload.worker_code)
+    save_task_runtime_state(task, state)
+
+    task.status = "running"
+    task.assigned_worker_code = payload.worker_code
+    worker.status = "running"
+    worker.current_task_title = task.title
+    worker.heartbeat_note = f"已领取任务 #{task.id}"
+    worker.last_heartbeat_at = utcnow()
+    db.commit()
+    db.refresh(task)
+    return {"ok": True, "item": serialize_task_record(task), "reused": False}
+
+
+@app.post("/worker/tasks/{task_id}/complete")
+def complete_task(task_id: int, payload: WorkerTaskCompleteRequest, db: Session = Depends(get_db)):
+    task = get_task_or_404(db, task_id)
+    if task.assigned_worker_code != payload.worker_code:
+        raise HTTPException(status_code=409, detail="该任务未分配给当前 Worker")
+
+    worker = get_worker_or_404(db, payload.worker_code)
+    state = get_task_runtime_state(task)
+    state["last_error"] = ""
+    state["output"] = payload.result
+    append_task_history(state, "completed", worker_code=payload.worker_code)
+    save_task_runtime_state(task, state)
+
+    task.status = "success"
+    set_worker_idle_if_online(worker, f"最近完成任务 #{task.id}")
+    worker.last_heartbeat_at = utcnow()
+    db.commit()
+    db.refresh(task)
+    return {"ok": True, "item": serialize_task_record(task)}
+
+
+@app.post("/worker/tasks/{task_id}/fail")
+def fail_task(task_id: int, payload: WorkerTaskFailRequest, db: Session = Depends(get_db)):
+    task = get_task_or_404(db, task_id)
+    if task.assigned_worker_code != payload.worker_code:
+        raise HTTPException(status_code=409, detail="该任务未分配给当前 Worker")
+
+    worker = get_worker_or_404(db, payload.worker_code)
+    state = get_task_runtime_state(task)
+    max_retries = int(state.get("max_retries", 2))
+    next_retry_count = int(state.get("retry_count", 0))
+    will_retry = payload.retryable and next_retry_count < max_retries
+
+    if will_retry:
+        next_retry_count += 1
+        state["retry_count"] = next_retry_count
+        task.status = "queued"
+        task.assigned_worker_code = ""
+    else:
+        task.status = "failed"
+
+    state["last_error"] = payload.error_message
+    if payload.result:
+        state["output"] = payload.result
+    append_task_history(
+        state,
+        "failed" if not will_retry else "retry_queued",
+        worker_code=payload.worker_code,
+        retryable=payload.retryable,
+        retry_count=state.get("retry_count", 0),
+        error_message=payload.error_message,
+    )
+    save_task_runtime_state(task, state)
+
+    set_worker_idle_if_online(
+        worker,
+        f"任务 #{task.id} {'已进入重试队列' if will_retry else '执行失败'}",
+    )
+    worker.last_heartbeat_at = utcnow()
+    db.commit()
+    db.refresh(task)
+    return {"ok": True, "item": serialize_task_record(task), "will_retry": will_retry}
+
+
+@app.post("/tasks/{task_id}/retry")
+def retry_task(task_id: int, db: Session = Depends(get_db)):
+    task = get_task_or_404(db, task_id)
+    state = get_task_runtime_state(task)
+    state["manual_retry_count"] = int(state.get("manual_retry_count", 0)) + 1
+    state["last_error"] = ""
+    append_task_history(state, "manual_retry")
+    save_task_runtime_state(task, state)
+
+    if task.assigned_worker_code:
+        worker = db.scalar(select(WorkerNode).where(WorkerNode.worker_code == task.assigned_worker_code))
+        if worker:
+            set_worker_idle_if_online(worker, f"任务 #{task.id} 已手动重试")
+
+    task.assigned_worker_code = ""
+    task.status = "queued"
+    db.commit()
+    db.refresh(task)
+    return {"ok": True, "item": serialize_task_record(task)}

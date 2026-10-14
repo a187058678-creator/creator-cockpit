@@ -36,6 +36,8 @@ const secondaryButtonStyle = {
   border: "1px solid #334155",
 };
 
+const taskStatusOptions = ["pending", "queued", "running", "success", "failed", "cancelled"];
+
 function StatusBadge({ ok, text }) {
   return (
     <span
@@ -137,6 +139,7 @@ export default function HomePage() {
   const [records, setRecords] = useState([]);
   const [tasks, setTasks] = useState([]);
   const [workers, setWorkers] = useState([]);
+  const [taskDrafts, setTaskDrafts] = useState({});
   const [listPrefix, setListPrefix] = useState("assets");
   const [taskFilter, setTaskFilter] = useState("");
   const [textPrefix, setTextPrefix] = useState("assets");
@@ -387,6 +390,78 @@ export default function HomePage() {
     }
   }
 
+  function updateTaskDraft(taskId, field, value) {
+    setTaskDrafts((prev) => ({
+      ...prev,
+      [taskId]: {
+        ...(prev[taskId] || {}),
+        [field]: value,
+      },
+    }));
+  }
+
+  async function saveTaskUpdate(task) {
+    const draft = taskDrafts[task.id] || {};
+    const nextStatus = draft.status ?? task.status;
+    const nextWorkerCode = draft.assigned_worker_code ?? task.assigned_worker_code ?? "";
+
+    setBusy(`task-${task.id}`);
+    setMessage(`正在更新任务 #${task.id}...`);
+    try {
+      const data = await readJson(
+        await fetch(`/api/tasks/${task.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            status: nextStatus,
+            assigned_worker_code: nextWorkerCode,
+          }),
+        })
+      );
+      setMessage(`任务已更新：#${data.item.id} -> ${data.item.status}`);
+      setTaskDrafts((prev) => {
+        const next = { ...prev };
+        delete next[task.id];
+        return next;
+      });
+      await Promise.all([
+        loadTasks(taskFilter),
+        loadTaskSummary(),
+        loadWorkers(),
+        loadWorkerSummary(),
+        loadSummary(),
+      ]);
+    } catch (error) {
+      setMessage(error.message || "更新任务失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function retryTask(taskId) {
+    setBusy(`task-retry-${taskId}`);
+    setMessage(`正在重试任务 #${taskId}...`);
+    try {
+      const data = await readJson(
+        await fetch(`/api/tasks/${taskId}/retry`, {
+          method: "POST",
+        })
+      );
+      setMessage(`任务已重试入队：#${data.item.id}`);
+      await Promise.all([
+        loadTasks(taskFilter),
+        loadTaskSummary(),
+        loadWorkers(),
+        loadWorkerSummary(),
+        loadSummary(),
+      ]);
+    } catch (error) {
+      setMessage(error.message || "任务重试失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
   async function submitHeartbeat(event) {
     event.preventDefault();
     setBusy("worker");
@@ -548,6 +623,7 @@ export default function HomePage() {
                 <div>待处理：{taskSummary.pending || 0}</div>
                 <div>运行中：{taskSummary.running || 0}</div>
                 <div>成功：{taskSummary.success || 0}</div>
+                <div>失败：{taskSummary.failed || 0}</div>
                 <div>最新任务：{taskSummary.latest?.title || "暂无"}</div>
               </div>
             </div>
@@ -559,7 +635,10 @@ export default function HomePage() {
                 <div>在线：{workerSummary.online || 0}</div>
                 <div>离线：{workerSummary.offline || 0}</div>
                 <div>最新节点：{workerSummary.latest?.display_name || "暂无"}</div>
-                <div>节点状态：{workerSummary.latest?.status || "-"}</div>
+                <div>
+                  节点状态：{workerSummary.latest?.status || "-"}
+                  {workerSummary.latest?.is_timed_out ? "（心跳超时）" : ""}
+                </div>
               </div>
             </div>
           </section>
@@ -718,8 +797,11 @@ export default function HomePage() {
                       <th style={{ padding: "10px 8px", width: 60 }}>ID</th>
                       <th style={{ padding: "10px 8px" }}>标题</th>
                       <th style={{ padding: "10px 8px", width: 100 }}>类型</th>
-                      <th style={{ padding: "10px 8px", width: 100 }}>状态</th>
+                      <th style={{ padding: "10px 8px", width: 140 }}>状态流转</th>
+                      <th style={{ padding: "10px 8px", width: 180 }}>指派 Worker</th>
+                      <th style={{ padding: "10px 8px", width: 120 }}>尝试/重试</th>
                       <th style={{ padding: "10px 8px", width: 100 }}>优先级</th>
+                      <th style={{ padding: "10px 8px", width: 180 }}>操作</th>
                       <th style={{ padding: "10px 8px", width: 180 }}>创建时间</th>
                     </tr>
                   </thead>
@@ -727,7 +809,7 @@ export default function HomePage() {
                     {tasks.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={6}
+                          colSpan={8}
                           style={{ padding: "14px 8px", color: "#94a3b8", borderTop: "1px solid #26314f" }}
                         >
                           当前没有任务记录。
@@ -744,8 +826,67 @@ export default function HomePage() {
                             </div>
                           </td>
                           <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>{item.task_type}</td>
-                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>{item.status}</td>
+                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
+                            <select
+                              style={inputStyle}
+                              value={taskDrafts[item.id]?.status ?? item.status}
+                              onChange={(event) => updateTaskDraft(item.id, "status", event.target.value)}
+                            >
+                              {taskStatusOptions.map((status) => (
+                                <option key={status} value={status}>
+                                  {status}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
+                            <select
+                              style={inputStyle}
+                              value={taskDrafts[item.id]?.assigned_worker_code ?? item.assigned_worker_code ?? ""}
+                              onChange={(event) =>
+                                updateTaskDraft(item.id, "assigned_worker_code", event.target.value)
+                              }
+                            >
+                              <option value="">未指派</option>
+                              {workers.map((worker) => (
+                                <option key={worker.worker_code} value={worker.worker_code}>
+                                  {worker.display_name} ({worker.status})
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
+                            <div>尝试 {item.attempt_count || 0}</div>
+                            <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
+                              重试 {item.retry_count || 0}/{item.max_retries || 0}
+                            </div>
+                            {item.last_error ? (
+                              <div style={{ marginTop: 4, fontSize: 12, color: "#fca5a5" }}>
+                                {item.last_error}
+                              </div>
+                            ) : null}
+                          </td>
                           <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>{item.priority}</td>
+                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
+                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                              <button
+                                style={buttonStyle}
+                                onClick={() => saveTaskUpdate(item)}
+                                disabled={busy === `task-${item.id}`}
+                              >
+                                {busy === `task-${item.id}` ? "保存中..." : "保存"}
+                              </button>
+                              {["failed", "cancelled", "success"].includes(item.status) ? (
+                                <button
+                                  style={secondaryButtonStyle}
+                                  onClick={() => retryTask(item.id)}
+                                  disabled={busy === `task-retry-${item.id}`}
+                                >
+                                  {busy === `task-retry-${item.id}` ? "重试中..." : "手动重试"}
+                                </button>
+                              ) : null}
+                            </div>
+                          </td>
                           <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
                             {formatDate(item.created_at)}
                           </td>
@@ -852,8 +993,10 @@ export default function HomePage() {
                     <tr style={{ textAlign: "left", color: "#94a3b8" }}>
                       <th style={{ padding: "10px 8px", width: 130 }}>Worker</th>
                       <th style={{ padding: "10px 8px", width: 100 }}>状态</th>
+                      <th style={{ padding: "10px 8px", width: 120 }}>上报状态</th>
                       <th style={{ padding: "10px 8px" }}>能力</th>
                       <th style={{ padding: "10px 8px" }}>当前任务</th>
+                      <th style={{ padding: "10px 8px" }}>心跳备注</th>
                       <th style={{ padding: "10px 8px", width: 180 }}>心跳时间</th>
                     </tr>
                   </thead>
@@ -861,7 +1004,7 @@ export default function HomePage() {
                     {workers.length === 0 ? (
                       <tr>
                         <td
-                          colSpan={5}
+                          colSpan={7}
                           style={{ padding: "14px 8px", color: "#94a3b8", borderTop: "1px solid #26314f" }}
                         >
                           当前还没有 Worker 节点记录。
@@ -878,12 +1021,19 @@ export default function HomePage() {
                           </td>
                           <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
                             {item.status}
+                            {item.is_timed_out ? (
+                              <div style={{ marginTop: 4, fontSize: 12, color: "#fca5a5" }}>心跳超时</div>
+                            ) : null}
                           </td>
+                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>{item.reported_status}</td>
                           <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
                             {(item.capabilities || []).join(", ") || "-"}
                           </td>
                           <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
                             {item.current_task_title || "-"}
+                          </td>
+                          <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
+                            {item.heartbeat_note || "-"}
                           </td>
                           <td style={{ padding: "12px 8px", borderTop: "1px solid #26314f" }}>
                             {formatDate(item.last_heartbeat_at)}
