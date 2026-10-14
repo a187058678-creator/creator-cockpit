@@ -626,9 +626,15 @@ class WorkerProcessor:
 
     def download_youtube(self, task: dict, source_url: str, paths: TaskPaths) -> Path:
         output_template = str(paths.raw_dir / "source.%(ext)s")
+        ffmpeg_location = self.ffmpeg_bin
+        if Path(self.ffmpeg_bin).suffix.lower() == ".exe":
+            ffmpeg_location = str(Path(self.ffmpeg_bin).parent)
         command = [
             self.ytdlp_bin,
             "--no-playlist",
+            "--no-update",
+            "--ffmpeg-location",
+            ffmpeg_location,
             "--merge-output-format",
             "mp4",
             "-o",
