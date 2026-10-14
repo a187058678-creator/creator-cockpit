@@ -6,7 +6,17 @@ export const metadata = {
 export default function RootLayout({ children }) {
   return (
     <html lang="zh-CN">
-      <body>{children}</body>
+      <body
+        style={{
+          margin: 0,
+          background: "#0b1020",
+          color: "#e5e7eb",
+          fontFamily:
+            'Inter, Arial, "PingFang SC", "Microsoft YaHei", sans-serif',
+        }}
+      >
+        {children}
+      </body>
     </html>
   );
 }
