@@ -1,4 +1,5 @@
 import os
+import json
 import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
@@ -12,7 +13,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db, init_db
-from app.models import AssetRecord
+from app.models import AssetRecord, TaskRecord, WorkerNode
 
 
 @asynccontextmanager
@@ -28,6 +29,25 @@ class UploadTextRequest(BaseModel):
     text: str
     prefix: str = "assets"
     filename: Optional[str] = None
+
+
+class CreateTaskRequest(BaseModel):
+    title: str
+    task_type: str = "publish"
+    source_type: str = "manual"
+    source_value: str = ""
+    priority: str = "normal"
+    payload: dict = {}
+
+
+class WorkerHeartbeatRequest(BaseModel):
+    worker_code: str
+    display_name: str
+    status: str = "idle"
+    machine_info: str = ""
+    capabilities: list[str] = []
+    current_task_title: str = ""
+    heartbeat_note: str = ""
 
 
 def get_required_env(name: str) -> str:
@@ -106,6 +126,39 @@ def serialize_asset_record(record: AssetRecord):
     }
 
 
+def serialize_task_record(record: TaskRecord):
+    return {
+        "id": record.id,
+        "title": record.title,
+        "task_type": record.task_type,
+        "source_type": record.source_type,
+        "source_value": record.source_value,
+        "status": record.status,
+        "priority": record.priority,
+        "assigned_worker_code": record.assigned_worker_code,
+        "payload": json.loads(record.payload_json or "{}"),
+        "result": json.loads(record.result_json or "{}"),
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+        "updated_at": record.updated_at.isoformat() if record.updated_at else None,
+    }
+
+
+def serialize_worker_node(record: WorkerNode):
+    return {
+        "id": record.id,
+        "worker_code": record.worker_code,
+        "display_name": record.display_name,
+        "status": record.status,
+        "machine_info": record.machine_info,
+        "capabilities": json.loads(record.capabilities or "[]"),
+        "current_task_title": record.current_task_title,
+        "heartbeat_note": record.heartbeat_note,
+        "last_heartbeat_at": record.last_heartbeat_at.isoformat() if record.last_heartbeat_at else None,
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+        "updated_at": record.updated_at.isoformat() if record.updated_at else None,
+    }
+
+
 @app.get("/health")
 def health(db: Session = Depends(get_db)):
     total_records = db.scalar(select(func.count()).select_from(AssetRecord)) or 0
@@ -116,13 +169,27 @@ def health(db: Session = Depends(get_db)):
 def dashboard_summary(db: Session = Depends(get_db)):
     total_records = db.scalar(select(func.count()).select_from(AssetRecord)) or 0
     latest_record = db.scalar(select(AssetRecord).order_by(desc(AssetRecord.id)).limit(1))
+    total_tasks = db.scalar(select(func.count()).select_from(TaskRecord)) or 0
+    pending_tasks = db.scalar(
+        select(func.count()).select_from(TaskRecord).where(TaskRecord.status.in_(["pending", "queued"]))
+    ) or 0
+    online_workers = db.scalar(
+        select(func.count()).select_from(WorkerNode).where(WorkerNode.status.in_(["idle", "running", "online"]))
+    ) or 0
+    latest_task = db.scalar(select(TaskRecord).order_by(desc(TaskRecord.id)).limit(1))
+    latest_worker = db.scalar(select(WorkerNode).order_by(desc(WorkerNode.id)).limit(1))
     return {
         "ok": True,
         "bucket": os.getenv("S3_BUCKET"),
         "storage_configured": bool(os.getenv("S3_BUCKET") and os.getenv("S3_ENDPOINT")),
         "database_configured": bool(os.getenv("DATABASE_URL")),
         "total_asset_records": total_records,
+        "total_tasks": total_tasks,
+        "pending_tasks": pending_tasks,
+        "online_workers": online_workers,
         "latest_asset_record": serialize_asset_record(latest_record) if latest_record else None,
+        "latest_task": serialize_task_record(latest_task) if latest_task else None,
+        "latest_worker": serialize_worker_node(latest_worker) if latest_worker else None,
     }
 
 
@@ -322,3 +389,113 @@ def delete_asset(key: str, db: Session = Depends(get_db)):
         }
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/tasks")
+def create_task(payload: CreateTaskRequest, db: Session = Depends(get_db)):
+    record = TaskRecord(
+        title=payload.title,
+        task_type=payload.task_type,
+        source_type=payload.source_type,
+        source_value=payload.source_value,
+        status="pending",
+        priority=payload.priority,
+        payload_json=json.dumps(payload.payload, ensure_ascii=False),
+        result_json="{}",
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return {"ok": True, "item": serialize_task_record(record)}
+
+
+@app.get("/tasks")
+def list_tasks(
+    status: str = Query("", description="按状态过滤"),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    statement = select(TaskRecord).order_by(desc(TaskRecord.id)).limit(limit)
+    if status:
+        statement = (
+            select(TaskRecord)
+            .where(TaskRecord.status == status)
+            .order_by(desc(TaskRecord.id))
+            .limit(limit)
+        )
+    items = db.scalars(statement).all()
+    return {"ok": True, "items": [serialize_task_record(item) for item in items]}
+
+
+@app.get("/tasks/summary")
+def tasks_summary(db: Session = Depends(get_db)):
+    total = db.scalar(select(func.count()).select_from(TaskRecord)) or 0
+    pending = db.scalar(
+        select(func.count()).select_from(TaskRecord).where(TaskRecord.status.in_(["pending", "queued"]))
+    ) or 0
+    running = db.scalar(
+        select(func.count()).select_from(TaskRecord).where(TaskRecord.status == "running")
+    ) or 0
+    success = db.scalar(
+        select(func.count()).select_from(TaskRecord).where(TaskRecord.status == "success")
+    ) or 0
+    latest = db.scalar(select(TaskRecord).order_by(desc(TaskRecord.id)).limit(1))
+    return {
+        "ok": True,
+        "total": total,
+        "pending": pending,
+        "running": running,
+        "success": success,
+        "latest": serialize_task_record(latest) if latest else None,
+    }
+
+
+@app.post("/workers/heartbeat")
+def worker_heartbeat(payload: WorkerHeartbeatRequest, db: Session = Depends(get_db)):
+    record = db.scalar(select(WorkerNode).where(WorkerNode.worker_code == payload.worker_code))
+    if not record:
+        record = WorkerNode(
+            worker_code=payload.worker_code,
+            display_name=payload.display_name,
+            status=payload.status,
+            machine_info=payload.machine_info,
+            capabilities=json.dumps(payload.capabilities, ensure_ascii=False),
+            current_task_title=payload.current_task_title,
+            heartbeat_note=payload.heartbeat_note,
+        )
+        db.add(record)
+    else:
+        record.display_name = payload.display_name
+        record.status = payload.status
+        record.machine_info = payload.machine_info
+        record.capabilities = json.dumps(payload.capabilities, ensure_ascii=False)
+        record.current_task_title = payload.current_task_title
+        record.heartbeat_note = payload.heartbeat_note
+    db.commit()
+    db.refresh(record)
+    return {"ok": True, "item": serialize_worker_node(record)}
+
+
+@app.get("/workers")
+def list_workers(limit: int = Query(20, ge=1, le=100), db: Session = Depends(get_db)):
+    items = db.scalars(select(WorkerNode).order_by(desc(WorkerNode.id)).limit(limit)).all()
+    return {"ok": True, "items": [serialize_worker_node(item) for item in items]}
+
+
+@app.get("/workers/summary")
+def workers_summary(db: Session = Depends(get_db)):
+    total = db.scalar(select(func.count()).select_from(WorkerNode)) or 0
+    online = db.scalar(
+        select(func.count()).select_from(WorkerNode).where(WorkerNode.status.in_(["idle", "running", "online"]))
+    ) or 0
+    offline = db.scalar(
+        select(func.count()).select_from(WorkerNode).where(WorkerNode.status == "offline")
+    ) or 0
+    latest = db.scalar(select(WorkerNode).order_by(desc(WorkerNode.id)).limit(1))
+    return {
+        "ok": True,
+        "total": total,
+        "online": online,
+        "offline": offline,
+        "latest": serialize_worker_node(latest) if latest else None,
+    }
