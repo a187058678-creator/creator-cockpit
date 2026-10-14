@@ -44,7 +44,59 @@ export default function TasksPageClient() {
     source_type: "youtube",
     source_value: "https://www.youtube.com/watch?v=demo",
     priority: "high",
-    payload: '{\n  "platforms": ["tiktok"],\n  "need_subtitles": true\n}',
+    payload:
+      '{\n' +
+      '  "schema_version": "creator-task/v1",\n' +
+      '  "source": {\n' +
+      '    "asset_key": "",\n' +
+      '    "start_seconds": 0,\n' +
+      '    "end_seconds": 0\n' +
+      '  },\n' +
+      '  "publish": {\n' +
+      '    "platforms": ["tiktok"],\n' +
+      '    "need_subtitles": true\n' +
+      '  },\n' +
+      '  "output": {\n' +
+      '    "prefix": "processed",\n' +
+      '    "target_height": 720,\n' +
+      '    "video_codec": "libx264",\n' +
+      '    "audio_codec": "aac"\n' +
+      '  },\n' +
+      '  "execution": {\n' +
+      '    "max_retries": 2,\n' +
+      '    "simulate_fail": false\n' +
+      '  },\n' +
+      '  "dedupe": {\n' +
+      '    "enabled": true,\n' +
+      '    "profile": "balanced",\n' +
+      '    "intensity": 0.55,\n' +
+      '    "seed": 0,\n' +
+      '    "randomize": true,\n' +
+      '    "trim": {\n' +
+      '      "head_seconds": 0.18,\n' +
+      '      "tail_seconds": 0.12\n' +
+      '    },\n' +
+      '    "speed": {\n' +
+      '      "min_factor": 1.01,\n' +
+      '      "max_factor": 1.035\n' +
+      '    },\n' +
+      '    "crop": {\n' +
+      '      "min_ratio": 0.978,\n' +
+      '      "max_ratio": 0.994\n' +
+      '    },\n' +
+      '    "rotation": {\n' +
+      '      "min_degrees": -0.45,\n' +
+      '      "max_degrees": 0.45\n' +
+      '    },\n' +
+      '    "mirror_chance": 0.15,\n' +
+      '    "color": {\n' +
+      '      "brightness_min": 0.97,\n' +
+      '      "brightness_max": 1.04,\n' +
+      '      "contrast_min": -4,\n' +
+      '      "contrast_max": 8\n' +
+      '    }\n' +
+      '  }\n' +
+      '}',
   });
 
   async function loadTaskSummary() {
@@ -282,7 +334,7 @@ export default function TasksPageClient() {
               style={{ ...inputStyle, minHeight: 140, resize: "vertical" }}
               value={taskForm.payload}
               onChange={(event) => setTaskForm((prev) => ({ ...prev, payload: event.target.value }))}
-              placeholder="高级参数 JSON"
+              placeholder="正式任务 payload JSON（creator-task/v1）"
             />
             <button style={buttonStyle} disabled={busy === "task"}>
               {busy === "task" ? "创建中..." : "创建任务"}

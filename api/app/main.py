@@ -2,14 +2,15 @@ import os
 import json
 import uuid
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import boto3
 from botocore.client import Config
 from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import case, desc, func, select
 from sqlalchemy.orm import Session
 
@@ -26,6 +27,317 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="Creator Cockpit API", lifespan=lifespan)
 
 
+TASK_PAYLOAD_SCHEMA_VERSION = "creator-task/v1"
+ALLOWED_DEDUPE_PROFILES = {"light", "balanced", "aggressive"}
+
+
+def clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        return max(minimum, min(maximum, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def clamp_float(value: Any, default: float, minimum: float, maximum: float) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, numeric))
+
+
+def coerce_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        raw = value.strip().lower()
+        if raw in {"1", "true", "yes", "y", "on"}:
+            return True
+        if raw in {"0", "false", "no", "n", "off"}:
+            return False
+    return default
+
+
+def ensure_str_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    for item in value:
+        text = str(item).strip()
+        if text:
+            result.append(text)
+    return result
+
+
+def deep_merge_dict(base: dict, updates: dict):
+    for key, value in updates.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            deep_merge_dict(base[key], value)
+        else:
+            base[key] = value
+
+
+def get_dedupe_profile_defaults(profile: str) -> dict:
+    normalized_profile = profile if profile in ALLOWED_DEDUPE_PROFILES else "balanced"
+    presets = {
+        "light": {
+            "enabled": True,
+            "profile": "light",
+            "intensity": 0.35,
+            "seed": 0,
+            "randomize": True,
+            "trim": {"head_seconds": 0.08, "tail_seconds": 0.05},
+            "speed": {"min_factor": 1.005, "max_factor": 1.018},
+            "crop": {"min_ratio": 0.988, "max_ratio": 0.998},
+            "rotation": {"min_degrees": -0.2, "max_degrees": 0.2},
+            "mirror_chance": 0.08,
+            "color": {
+                "brightness_min": 0.99,
+                "brightness_max": 1.02,
+                "contrast_min": -2.0,
+                "contrast_max": 4.0,
+            },
+        },
+        "balanced": {
+            "enabled": True,
+            "profile": "balanced",
+            "intensity": 0.55,
+            "seed": 0,
+            "randomize": True,
+            "trim": {"head_seconds": 0.18, "tail_seconds": 0.12},
+            "speed": {"min_factor": 1.01, "max_factor": 1.035},
+            "crop": {"min_ratio": 0.978, "max_ratio": 0.994},
+            "rotation": {"min_degrees": -0.45, "max_degrees": 0.45},
+            "mirror_chance": 0.15,
+            "color": {
+                "brightness_min": 0.97,
+                "brightness_max": 1.04,
+                "contrast_min": -4.0,
+                "contrast_max": 8.0,
+            },
+        },
+        "aggressive": {
+            "enabled": True,
+            "profile": "aggressive",
+            "intensity": 0.8,
+            "seed": 0,
+            "randomize": True,
+            "trim": {"head_seconds": 0.35, "tail_seconds": 0.22},
+            "speed": {"min_factor": 1.015, "max_factor": 1.06},
+            "crop": {"min_ratio": 0.965, "max_ratio": 0.99},
+            "rotation": {"min_degrees": -0.9, "max_degrees": 0.9},
+            "mirror_chance": 0.28,
+            "color": {
+                "brightness_min": 0.95,
+                "brightness_max": 1.06,
+                "contrast_min": -6.0,
+                "contrast_max": 12.0,
+            },
+        },
+    }
+    return deepcopy(presets[normalized_profile])
+
+
+def build_task_payload_defaults(profile: str = "balanced") -> dict:
+    return {
+        "schema_version": TASK_PAYLOAD_SCHEMA_VERSION,
+        "source": {
+            "asset_key": "",
+            "start_seconds": 0.0,
+            "end_seconds": 0.0,
+        },
+        "publish": {
+            "platforms": [],
+            "need_subtitles": False,
+        },
+        "output": {
+            "prefix": "processed",
+            "target_height": 720,
+            "video_codec": "libx264",
+            "audio_codec": "aac",
+        },
+        "execution": {
+            "max_retries": 2,
+            "simulate_fail": False,
+        },
+        "dedupe": get_dedupe_profile_defaults(profile),
+    }
+
+
+def normalize_task_payload(raw_payload: Any) -> dict:
+    payload = raw_payload if isinstance(raw_payload, dict) else {}
+    dedupe_section = payload.get("dedupe") if isinstance(payload.get("dedupe"), dict) else {}
+    profile_hint = str(dedupe_section.get("profile") or payload.get("profile") or "balanced").strip().lower()
+    defaults = build_task_payload_defaults(profile_hint)
+    normalized = deepcopy(defaults)
+
+    new_shape = {
+        "schema_version": payload.get("schema_version", TASK_PAYLOAD_SCHEMA_VERSION),
+        "source": payload.get("source") if isinstance(payload.get("source"), dict) else {},
+        "publish": payload.get("publish") if isinstance(payload.get("publish"), dict) else {},
+        "output": payload.get("output") if isinstance(payload.get("output"), dict) else {},
+        "execution": payload.get("execution") if isinstance(payload.get("execution"), dict) else {},
+        "dedupe": payload.get("dedupe") if isinstance(payload.get("dedupe"), dict) else {},
+    }
+    deep_merge_dict(normalized, new_shape)
+
+    legacy_shape = {"source": {}, "publish": {}, "output": {}, "execution": {}, "dedupe": {}}
+    if "asset_key" in payload:
+        legacy_shape["source"]["asset_key"] = payload.get("asset_key")
+    if "clip_start_seconds" in payload or "source_start_seconds" in payload:
+        legacy_shape["source"]["start_seconds"] = payload.get("clip_start_seconds", payload.get("source_start_seconds"))
+    if "clip_end_seconds" in payload or "source_end_seconds" in payload:
+        legacy_shape["source"]["end_seconds"] = payload.get("clip_end_seconds", payload.get("source_end_seconds"))
+    if "platforms" in payload:
+        legacy_shape["publish"]["platforms"] = payload.get("platforms")
+    if "need_subtitles" in payload:
+        legacy_shape["publish"]["need_subtitles"] = payload.get("need_subtitles")
+    if "output_prefix" in payload:
+        legacy_shape["output"]["prefix"] = payload.get("output_prefix")
+    if "target_height" in payload:
+        legacy_shape["output"]["target_height"] = payload.get("target_height")
+    if "max_retries" in payload:
+        legacy_shape["execution"]["max_retries"] = payload.get("max_retries")
+    if "simulate_fail" in payload:
+        legacy_shape["execution"]["simulate_fail"] = payload.get("simulate_fail")
+    if "profile" in payload:
+        legacy_shape["dedupe"]["profile"] = payload.get("profile")
+    if "trim_start_seconds" in payload:
+        legacy_shape["dedupe"].setdefault("trim", {})["head_seconds"] = payload.get("trim_start_seconds")
+    if "trim_end_seconds" in payload:
+        legacy_shape["dedupe"].setdefault("trim", {})["tail_seconds"] = payload.get("trim_end_seconds")
+    if "speed_factor" in payload:
+        legacy_shape["dedupe"].setdefault("speed", {})["min_factor"] = payload.get("speed_factor")
+        legacy_shape["dedupe"].setdefault("speed", {})["max_factor"] = payload.get("speed_factor")
+
+    deep_merge_dict(normalized, legacy_shape)
+
+    normalized["schema_version"] = TASK_PAYLOAD_SCHEMA_VERSION
+    normalized["source"]["asset_key"] = str(normalized["source"].get("asset_key") or "").strip()
+    normalized["source"]["start_seconds"] = clamp_float(
+        normalized["source"].get("start_seconds"),
+        0.0,
+        0.0,
+        86400.0,
+    )
+    normalized["source"]["end_seconds"] = clamp_float(
+        normalized["source"].get("end_seconds"),
+        0.0,
+        0.0,
+        86400.0,
+    )
+    if normalized["source"]["end_seconds"] and normalized["source"]["end_seconds"] < normalized["source"]["start_seconds"]:
+        normalized["source"]["end_seconds"] = normalized["source"]["start_seconds"]
+
+    normalized["publish"]["platforms"] = ensure_str_list(normalized["publish"].get("platforms"))
+    normalized["publish"]["need_subtitles"] = coerce_bool(
+        normalized["publish"].get("need_subtitles"),
+        False,
+    )
+
+    normalized["output"]["prefix"] = str(normalized["output"].get("prefix") or "processed").strip("/") or "processed"
+    normalized["output"]["target_height"] = clamp_int(
+        normalized["output"].get("target_height"),
+        720,
+        240,
+        2160,
+    )
+    normalized["output"]["video_codec"] = str(normalized["output"].get("video_codec") or "libx264").strip() or "libx264"
+    normalized["output"]["audio_codec"] = str(normalized["output"].get("audio_codec") or "aac").strip() or "aac"
+
+    normalized["execution"]["max_retries"] = clamp_int(
+        normalized["execution"].get("max_retries"),
+        2,
+        0,
+        10,
+    )
+    normalized["execution"]["simulate_fail"] = coerce_bool(
+        normalized["execution"].get("simulate_fail"),
+        False,
+    )
+
+    normalized_profile = str(normalized["dedupe"].get("profile") or "balanced").strip().lower()
+    if normalized_profile not in ALLOWED_DEDUPE_PROFILES:
+        normalized_profile = "balanced"
+    normalized["dedupe"]["profile"] = normalized_profile
+    normalized["dedupe"]["enabled"] = coerce_bool(normalized["dedupe"].get("enabled"), True)
+    normalized["dedupe"]["intensity"] = clamp_float(normalized["dedupe"].get("intensity"), 0.55, 0.0, 1.0)
+    normalized["dedupe"]["seed"] = clamp_int(normalized["dedupe"].get("seed"), 0, 0, 2147483647)
+    normalized["dedupe"]["randomize"] = coerce_bool(normalized["dedupe"].get("randomize"), True)
+    normalized["dedupe"]["mirror_chance"] = clamp_float(
+        normalized["dedupe"].get("mirror_chance"),
+        defaults["dedupe"]["mirror_chance"],
+        0.0,
+        1.0,
+    )
+
+    trim = normalized["dedupe"].setdefault("trim", {})
+    trim["head_seconds"] = clamp_float(trim.get("head_seconds"), defaults["dedupe"]["trim"]["head_seconds"], 0.0, 30.0)
+    trim["tail_seconds"] = clamp_float(trim.get("tail_seconds"), defaults["dedupe"]["trim"]["tail_seconds"], 0.0, 30.0)
+
+    speed = normalized["dedupe"].setdefault("speed", {})
+    speed["min_factor"] = clamp_float(speed.get("min_factor"), defaults["dedupe"]["speed"]["min_factor"], 0.9, 1.2)
+    speed["max_factor"] = clamp_float(speed.get("max_factor"), defaults["dedupe"]["speed"]["max_factor"], 0.9, 1.2)
+    if speed["min_factor"] > speed["max_factor"]:
+        speed["min_factor"], speed["max_factor"] = speed["max_factor"], speed["min_factor"]
+
+    crop = normalized["dedupe"].setdefault("crop", {})
+    crop["min_ratio"] = clamp_float(crop.get("min_ratio"), defaults["dedupe"]["crop"]["min_ratio"], 0.9, 1.0)
+    crop["max_ratio"] = clamp_float(crop.get("max_ratio"), defaults["dedupe"]["crop"]["max_ratio"], 0.9, 1.0)
+    if crop["min_ratio"] > crop["max_ratio"]:
+        crop["min_ratio"], crop["max_ratio"] = crop["max_ratio"], crop["min_ratio"]
+
+    rotation = normalized["dedupe"].setdefault("rotation", {})
+    rotation["min_degrees"] = clamp_float(
+        rotation.get("min_degrees"),
+        defaults["dedupe"]["rotation"]["min_degrees"],
+        -3.0,
+        3.0,
+    )
+    rotation["max_degrees"] = clamp_float(
+        rotation.get("max_degrees"),
+        defaults["dedupe"]["rotation"]["max_degrees"],
+        -3.0,
+        3.0,
+    )
+    if rotation["min_degrees"] > rotation["max_degrees"]:
+        rotation["min_degrees"], rotation["max_degrees"] = rotation["max_degrees"], rotation["min_degrees"]
+
+    color = normalized["dedupe"].setdefault("color", {})
+    color["brightness_min"] = clamp_float(
+        color.get("brightness_min"),
+        defaults["dedupe"]["color"]["brightness_min"],
+        0.85,
+        1.15,
+    )
+    color["brightness_max"] = clamp_float(
+        color.get("brightness_max"),
+        defaults["dedupe"]["color"]["brightness_max"],
+        0.85,
+        1.15,
+    )
+    if color["brightness_min"] > color["brightness_max"]:
+        color["brightness_min"], color["brightness_max"] = color["brightness_max"], color["brightness_min"]
+    color["contrast_min"] = clamp_float(
+        color.get("contrast_min"),
+        defaults["dedupe"]["color"]["contrast_min"],
+        -20.0,
+        20.0,
+    )
+    color["contrast_max"] = clamp_float(
+        color.get("contrast_max"),
+        defaults["dedupe"]["color"]["contrast_max"],
+        -20.0,
+        20.0,
+    )
+    if color["contrast_min"] > color["contrast_max"]:
+        color["contrast_min"], color["contrast_max"] = color["contrast_max"], color["contrast_min"]
+
+    return normalized
+
+
 class UploadTextRequest(BaseModel):
     text: str
     prefix: str = "assets"
@@ -38,7 +350,7 @@ class CreateTaskRequest(BaseModel):
     source_type: str = "manual"
     source_value: str = ""
     priority: str = "normal"
-    payload: dict = {}
+    payload: dict = Field(default_factory=dict)
 
 
 class WorkerHeartbeatRequest(BaseModel):
@@ -63,14 +375,14 @@ class WorkerTaskClaimRequest(BaseModel):
 
 class WorkerTaskCompleteRequest(BaseModel):
     worker_code: str
-    result: dict = {}
+    result: dict = Field(default_factory=dict)
 
 
 class WorkerTaskFailRequest(BaseModel):
     worker_code: str
     error_message: str
     retryable: bool = True
-    result: dict = {}
+    result: dict = Field(default_factory=dict)
 
 
 def get_required_env(name: str) -> str:
@@ -223,6 +535,7 @@ def append_task_history(state: dict, event: str, **extra):
 
 def serialize_task_record(record: TaskRecord):
     runtime_state = get_task_runtime_state(record)
+    task_payload = normalize_task_payload(load_json_field(record.payload_json, {}))
     return {
         "id": record.id,
         "title": record.title,
@@ -232,7 +545,7 @@ def serialize_task_record(record: TaskRecord):
         "status": record.status,
         "priority": record.priority,
         "assigned_worker_code": record.assigned_worker_code,
-        "payload": json.loads(record.payload_json or "{}"),
+        "payload": task_payload,
         "result": runtime_state,
         "attempt_count": runtime_state.get("attempt_count", 0),
         "retry_count": runtime_state.get("retry_count", 0),
@@ -534,11 +847,12 @@ def delete_asset(key: str, db: Session = Depends(get_db)):
 
 @app.post("/tasks")
 def create_task(payload: CreateTaskRequest, db: Session = Depends(get_db)):
+    normalized_payload = normalize_task_payload(payload.payload)
     runtime_state = {
         "attempt_count": 0,
         "retry_count": 0,
         "manual_retry_count": 0,
-        "max_retries": int(payload.payload.get("max_retries", 2)) if isinstance(payload.payload, dict) else 2,
+        "max_retries": normalized_payload["execution"]["max_retries"],
         "last_error": "",
         "history": [],
     }
@@ -550,7 +864,7 @@ def create_task(payload: CreateTaskRequest, db: Session = Depends(get_db)):
         source_value=payload.source_value,
         status="pending",
         priority=payload.priority,
-        payload_json=json.dumps(payload.payload, ensure_ascii=False),
+        payload_json=json.dumps(normalized_payload, ensure_ascii=False),
         result_json=json.dumps(runtime_state, ensure_ascii=False),
     )
     db.add(record)

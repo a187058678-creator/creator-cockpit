@@ -35,24 +35,74 @@
 - `source_type = http / https / download / direct_url`：`source_value` 填素材直链
 - `source_type = local_file`：`source_value` 填本地绝对路径
 
-## 推荐任务 payload
+## 正式任务 payload（creator-task/v1）
 
 ```json
 {
-  "platforms": ["tiktok"],
-  "need_subtitles": true,
-  "output_prefix": "processed",
-  "trim_start_seconds": 0,
-  "trim_end_seconds": 0,
-  "speed_factor": 1.02,
-  "target_height": 720,
-  "max_retries": 2
+  "schema_version": "creator-task/v1",
+  "source": {
+    "asset_key": "",
+    "start_seconds": 0,
+    "end_seconds": 0
+  },
+  "publish": {
+    "platforms": ["tiktok"],
+    "need_subtitles": true
+  },
+  "output": {
+    "prefix": "processed",
+    "target_height": 720,
+    "video_codec": "libx264",
+    "audio_codec": "aac"
+  },
+  "execution": {
+    "max_retries": 2,
+    "simulate_fail": false
+  },
+  "dedupe": {
+    "enabled": true,
+    "profile": "balanced",
+    "intensity": 0.55,
+    "seed": 0,
+    "randomize": true,
+    "trim": {
+      "head_seconds": 0.18,
+      "tail_seconds": 0.12
+    },
+    "speed": {
+      "min_factor": 1.01,
+      "max_factor": 1.035
+    },
+    "crop": {
+      "min_ratio": 0.978,
+      "max_ratio": 0.994
+    },
+    "rotation": {
+      "min_degrees": -0.45,
+      "max_degrees": 0.45
+    },
+    "mirror_chance": 0.15,
+    "color": {
+      "brightness_min": 0.97,
+      "brightness_max": 1.04,
+      "contrast_min": -4,
+      "contrast_max": 8
+    }
+  }
 }
 ```
+
+### 去重流水线说明
+
+- `profile`：`light / balanced / aggressive`
+- `intensity`：0 到 1，控制随机扰动强度
+- `seed`：`0` 表示默认用任务 ID；固定非 0 值可复现同一套扰动
+- `trim / speed / crop / rotation / mirror_chance / color`：共同组成 MoviePy 去重流水线
+- 旧版扁平字段（如 `speed_factor`、`trim_start_seconds`、`output_prefix`）仍兼容，但创建任务时会被归一化成 `creator-task/v1`
 
 ## 模拟失败开关
 
 创建任务时，如果满足以下任一条件，Worker 会走失败回写：
 
-- `payload.simulate_fail = true`
+- `payload.execution.simulate_fail = true`
 - `title` 或 `source_value` 包含 `fail-demo`
