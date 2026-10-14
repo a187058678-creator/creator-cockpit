@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import random
 import shutil
@@ -14,12 +15,6 @@ from urllib.parse import urlparse
 import boto3
 import requests
 from botocore.client import Config
-
-try:
-    from moviepy import VideoFileClip, vfx
-except ImportError:  # pragma: no cover
-    VideoFileClip = None
-    vfx = None
 
 
 TASK_PAYLOAD_SCHEMA_VERSION = "creator-task/v1"
@@ -336,6 +331,14 @@ class DedupePlan:
     contrast_amount: float
 
 
+@dataclass
+class MediaInfo:
+    width: int
+    height: int
+    duration_seconds: float
+    has_audio: bool
+
+
 class WorkerClient:
     def __init__(self):
         self.api_base_url = env("API_BASE_URL").rstrip("/")
@@ -347,7 +350,7 @@ class WorkerClient:
         self.machine_info = env("WORKER_MACHINE_INFO", "Windows Worker")
         self.capabilities = [
             item.strip()
-            for item in env("WORKER_CAPABILITIES", "yt-dlp,ffmpeg,moviepy,upload-r2").split(",")
+            for item in env("WORKER_CAPABILITIES", "yt-dlp,ffmpeg,ffprobe,upload-r2").split(",")
             if item.strip()
         ]
         self.idle_status = env("WORKER_IDLE_STATUS", "idle")
@@ -401,6 +404,7 @@ class WorkerProcessor:
         self.client = client
         self.ytdlp_bin = env("YTDLP_BIN", "yt-dlp")
         self.ffmpeg_bin = env("FFMPEG_BIN", "ffmpeg")
+        self.ffprobe_bin = env("FFPROBE_BIN", "ffprobe")
         self.s3_bucket = env("S3_BUCKET")
         self.s3_region = env("S3_REGION", "auto")
         self.s3_endpoint = env("S3_ENDPOINT")
@@ -411,9 +415,8 @@ class WorkerProcessor:
 
     def require_runtime(self):
         find_command(self.ffmpeg_bin)
+        find_command(self.ffprobe_bin)
         find_command(self.ytdlp_bin)
-        if VideoFileClip is None or vfx is None:
-            raise RuntimeError("MoviePy 未安装，请先执行 pip install -r worker/requirements.txt")
         if not all([self.s3_bucket, self.s3_endpoint, self.s3_access_key, self.s3_secret_key]):
             raise RuntimeError("缺少 R2 环境变量，请填写 S3_BUCKET / S3_ENDPOINT / S3_ACCESS_KEY / S3_SECRET_KEY")
 
@@ -560,6 +563,67 @@ class WorkerProcessor:
             tail = "\n".join(output_lines[-10:])
             raise RuntimeError(f"{note} 失败，退出码 {process.returncode}\n{tail}")
 
+    def probe_media_info(self, media_path: Path) -> MediaInfo:
+        command = [
+            self.ffprobe_bin,
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-show_format",
+            str(media_path),
+        ]
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(f"ffprobe 探测媒体信息失败：{completed.stderr.strip()}")
+
+        try:
+            data = json.loads(completed.stdout or "{}")
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"ffprobe 返回内容无法解析：{error}") from error
+
+        streams = data.get("streams") or []
+        video_stream = next((item for item in streams if item.get("codec_type") == "video"), None)
+        if not video_stream:
+            raise RuntimeError("输入文件中未找到视频流")
+
+        width = clamp_int(video_stream.get("width"), 0, 1, 100000)
+        height = clamp_int(video_stream.get("height"), 0, 1, 100000)
+        duration = clamp_float(
+            video_stream.get("duration") or (data.get("format") or {}).get("duration"),
+            0.0,
+            0.0,
+            86400.0,
+        )
+        has_audio = any(item.get("codec_type") == "audio" for item in streams)
+        return MediaInfo(
+            width=width,
+            height=height,
+            duration_seconds=duration,
+            has_audio=has_audio,
+        )
+
+    def build_atempo_filters(self, speed_factor: float) -> list[str]:
+        if abs(speed_factor - 1.0) <= 1e-6:
+            return []
+
+        filters = []
+        remaining = speed_factor
+        while remaining > 2.0:
+            filters.append("atempo=2.0")
+            remaining /= 2.0
+        while remaining < 0.5:
+            filters.append("atempo=0.5")
+            remaining /= 0.5
+        filters.append(f"atempo={remaining:.6f}")
+        return filters
+
     def download_youtube(self, task: dict, source_url: str, paths: TaskPaths) -> Path:
         output_template = str(paths.raw_dir / "source.%(ext)s")
         command = [
@@ -641,85 +705,82 @@ class WorkerProcessor:
             raise RuntimeError("FFmpeg 输出文件不存在")
         return output_path
 
-    def process_with_moviepy(self, task: dict, input_path: Path, paths: TaskPaths) -> Path:
+    def process_with_ffmpeg(self, task: dict, input_path: Path, paths: TaskPaths) -> tuple[Path, DedupePlan]:
         payload = self.get_payload(task)
         output_path = paths.output_dir / "final.mp4"
-        target_height = int(payload["output"]["target_height"])
         source_section = payload["source"]
+        media_info = self.probe_media_info(input_path)
+        plan = self.get_dedupe_plan(task, media_info.width, media_info.height)
 
-        self.heartbeat(task, "使用 MoviePy 精修成片")
-        clip = VideoFileClip(str(input_path))
-        try:
-            processed = clip
-            duration = float(clip.duration or 0)
-            plan = self.get_dedupe_plan(
-                task,
-                int(getattr(clip, "w", 0) or 0),
-                int(getattr(clip, "h", 0) or 0),
-            )
+        trim_start = max(0.0, float(source_section.get("start_seconds") or 0.0) + plan.head_trim_seconds)
+        trim_end = max(0.0, float(source_section.get("end_seconds") or 0.0))
+        end_at = trim_end if trim_end > 0 else media_info.duration_seconds
+        if plan.tail_trim_seconds > 0:
+            end_at = min(end_at, media_info.duration_seconds) - plan.tail_trim_seconds
+        end_at = min(media_info.duration_seconds, end_at)
+        if end_at <= trim_start + 0.1:
+            end_at = min(media_info.duration_seconds, trim_start + 0.1)
+        output_duration = max(0.1, end_at - trim_start)
 
-            trim_start = max(
-                0.0,
-                float(source_section.get("start_seconds") or 0.0) + plan.head_trim_seconds,
-            )
-            trim_end = max(
-                0.0,
-                float(source_section.get("end_seconds") or 0.0),
-            )
-            end_at = trim_end if trim_end > 0 else duration
-            if plan.tail_trim_seconds > 0:
-                end_at = min(end_at, duration) - plan.tail_trim_seconds
-            end_at = min(duration, end_at)
-            if end_at <= trim_start + 0.1:
-                end_at = min(duration, trim_start + 0.1)
-            if trim_start > 0 or end_at < duration:
-                processed = processed.subclipped(trim_start, end_at)
+        current_width = media_info.width
+        current_height = media_info.height
+        target_width = max(2, int(current_width * plan.crop_ratio))
+        target_crop_height = max(2, int(current_height * plan.crop_ratio))
+        max_x = max(0, current_width - target_width)
+        max_y = max(0, current_height - target_crop_height)
+        crop_x = int(max_x * plan.crop_x_ratio)
+        crop_y = int(max_y * plan.crop_y_ratio)
 
-            effects = []
-            if plan.mirror and hasattr(vfx, "MirrorX"):
-                effects.append(vfx.MirrorX())
-            if abs(plan.speed_factor - 1.0) > 1e-6 and hasattr(vfx, "MultiplySpeed"):
-                effects.append(vfx.MultiplySpeed(plan.speed_factor))
+        contrast_factor = max(0.1, 1.0 + (plan.contrast_amount / 100.0))
+        brightness_shift = plan.brightness_factor - 1.0
 
-            if plan.crop_ratio < 0.999 and hasattr(vfx, "Crop"):
-                current_width = int(getattr(processed, "w", clip.w) or clip.w)
-                current_height = int(getattr(processed, "h", clip.h) or clip.h)
-                target_width = max(2, int(current_width * plan.crop_ratio))
-                target_crop_height = max(2, int(current_height * plan.crop_ratio))
-                max_x = max(0, current_width - target_width)
-                max_y = max(0, current_height - target_crop_height)
-                x1 = int(max_x * plan.crop_x_ratio)
-                y1 = int(max_y * plan.crop_y_ratio)
-                effects.append(vfx.Crop(x1=x1, y1=y1, x2=x1 + target_width, y2=y1 + target_crop_height))
+        video_filters = []
+        if target_width < current_width or target_crop_height < current_height:
+            video_filters.append(f"crop={target_width}:{target_crop_height}:{crop_x}:{crop_y}")
+        if plan.mirror:
+            video_filters.append("hflip")
+        if abs(plan.rotation_degrees) > 1e-6:
+            radians = math.radians(plan.rotation_degrees)
+            video_filters.append(f"rotate={radians:.8f}:fillcolor=black")
+        if abs(brightness_shift) > 1e-6 or abs(contrast_factor - 1.0) > 1e-6:
+            video_filters.append(f"eq=brightness={brightness_shift:.6f}:contrast={contrast_factor:.6f}")
+        if abs(plan.speed_factor - 1.0) > 1e-6:
+            video_filters.append(f"setpts=PTS/{plan.speed_factor:.6f}")
+        video_filters.append(f"scale=-2:{int(payload['output']['target_height'])}")
+        video_filters.append("format=yuv420p")
 
-            if abs(plan.rotation_degrees) > 1e-6 and hasattr(vfx, "Rotate"):
-                effects.append(vfx.Rotate(plan.rotation_degrees))
-            if abs(plan.brightness_factor - 1.0) > 1e-6 and hasattr(vfx, "MultiplyColor"):
-                effects.append(vfx.MultiplyColor(plan.brightness_factor))
-            if abs(plan.contrast_amount) > 1e-6 and hasattr(vfx, "LumContrast"):
-                effects.append(vfx.LumContrast(contrast=plan.contrast_amount))
+        audio_filters = self.build_atempo_filters(plan.speed_factor) if media_info.has_audio else []
 
-            if effects:
-                processed = processed.with_effects(effects)
+        command = [
+            self.ffmpeg_bin,
+            "-y",
+            "-i",
+            str(input_path),
+            "-ss",
+            f"{trim_start:.6f}",
+            "-t",
+            f"{output_duration:.6f}",
+            "-vf",
+            ",".join(video_filters),
+            "-c:v",
+            payload["output"]["video_codec"],
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+        ]
+        if media_info.has_audio:
+            if audio_filters:
+                command.extend(["-af", ",".join(audio_filters)])
+            command.extend(["-c:a", payload["output"]["audio_codec"]])
+        else:
+            command.append("-an")
+        command.extend(["-movflags", "+faststart", str(output_path)])
 
-            if target_height:
-                processed = processed.resized(height=target_height)
-
-            processed.write_videofile(
-                str(output_path),
-                codec=payload["output"]["video_codec"],
-                audio_codec=payload["output"]["audio_codec"],
-                fps=processed.fps or 30,
-                logger=None,
-            )
-        finally:
-            if 'processed' in locals() and processed is not clip:
-                processed.close()
-            clip.close()
-
+        self.run_subprocess(command, task, "使用 FFmpeg 去重流水线处理成片")
         if not output_path.exists():
-            raise RuntimeError("MoviePy 输出文件不存在")
-        return output_path
+            raise RuntimeError("FFmpeg 去重流水线输出文件不存在")
+        return output_path, plan
 
     def create_s3_client(self):
         return boto3.client(
@@ -766,17 +827,8 @@ class WorkerProcessor:
 
         source_path = self.resolve_source(task, paths)
         normalized_path = self.normalize_with_ffmpeg(task, source_path, paths)
-        final_path = self.process_with_moviepy(task, normalized_path, paths)
+        final_path, dedupe_plan = self.process_with_ffmpeg(task, normalized_path, paths)
         asset = self.upload_to_r2(task, final_path)
-        inspect_clip = VideoFileClip(str(normalized_path))
-        try:
-            dedupe_plan = self.get_dedupe_plan(
-                task,
-                int(getattr(inspect_clip, "w", 0) or 0),
-                int(getattr(inspect_clip, "h", 0) or 0),
-            )
-        finally:
-            inspect_clip.close()
         return {
             "processed_by": self.client.worker_code,
             "completed_at": now_iso(),
@@ -784,7 +836,7 @@ class WorkerProcessor:
                 "source_type": task.get("source_type") or self.client.default_source_type,
                 "used_yt_dlp": True,
                 "used_ffmpeg": True,
-                "used_moviepy": True,
+                "used_ffmpeg_dedupe": True,
                 "working_directory": str(paths.root_dir),
                 "schema_version": payload["schema_version"],
             },
@@ -809,7 +861,7 @@ class WorkerProcessor:
                 "brightness_factor": dedupe_plan.brightness_factor,
                 "contrast_amount": dedupe_plan.contrast_amount,
             },
-            "message": "Worker 已完成真实拉素材 / FFmpeg / MoviePy 去重流水线 / R2 上传流程",
+            "message": "Worker 已完成真实拉素材 / FFmpeg 归一化 / FFmpeg 去重流水线 / R2 上传流程",
         }
 
 

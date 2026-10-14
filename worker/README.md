@@ -4,7 +4,7 @@
 
 - 拉素材：`yt-dlp` 或 HTTP 直链
 - 归一化：`ffmpeg`
-- 精修输出：`MoviePy 2.x`
+- 去重输出：纯 `FFmpeg` 流水线
 - 上传结果：直传 Cloudflare R2
 - 任务回写：完成 / 失败 / 重试
 
@@ -15,7 +15,7 @@
 2. 安装本地工具：
    - `yt-dlp`
    - `ffmpeg`
-   - `MoviePy 2.x`（已在 `requirements.txt` 中）
+   - `ffprobe`
 3. 修改 `run_worker.bat`：
    - `API_BASE_URL`
    - `S3_BUCKET / S3_ENDPOINT / S3_ACCESS_KEY / S3_SECRET_KEY`
@@ -97,7 +97,7 @@
 - `profile`：`light / balanced / aggressive`
 - `intensity`：0 到 1，控制随机扰动强度
 - `seed`：`0` 表示默认用任务 ID；固定非 0 值可复现同一套扰动
-- `trim / speed / crop / rotation / mirror_chance / color`：共同组成 MoviePy 去重流水线
+- `trim / speed / crop / rotation / mirror_chance / color`：共同组成纯 `FFmpeg` 去重流水线
 - 旧版扁平字段（如 `speed_factor`、`trim_start_seconds`、`output_prefix`）仍兼容，但创建任务时会被归一化成 `creator-task/v1`
 
 ## 模拟失败开关
