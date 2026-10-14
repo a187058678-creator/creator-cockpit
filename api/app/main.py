@@ -1,26 +1,41 @@
 import os
 import uuid
-from datetime import timedelta
+from contextlib import asynccontextmanager
 from typing import Optional
 
 import boto3
 from botocore.client import Config
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel
+from sqlalchemy import desc, func, select
+from sqlalchemy.orm import Session
 
-app = FastAPI(title="Creator Cockpit API")
+from app.db import get_db, init_db
+from app.models import AssetRecord
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()
+    yield
+
+
+app = FastAPI(title="Creator Cockpit API", lifespan=lifespan)
+
 
 class UploadTextRequest(BaseModel):
     text: str
     prefix: str = "assets"
     filename: Optional[str] = None
 
+
 def get_required_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
         raise HTTPException(status_code=500, detail=f"Missing env var: {name}")
     return value
+
 
 def get_s3_client():
     return boto3.client(
@@ -32,53 +47,140 @@ def get_s3_client():
         config=Config(signature_version="s3v4"),
     )
 
+
 def get_bucket_name() -> str:
     return get_required_env("S3_BUCKET")
+
 
 def build_object_url(key: str) -> str:
     endpoint = get_required_env("S3_ENDPOINT").rstrip("/")
     bucket = get_bucket_name()
     return f"{endpoint}/{bucket}/{key}"
 
+
+def create_asset_record(
+    db: Session,
+    *,
+    source_type: str,
+    bucket: str,
+    key: str,
+    prefix: str,
+    original_filename: str,
+    stored_filename: str,
+    content_type: str,
+    size_bytes: int,
+    storage_url: str,
+):
+    record = AssetRecord(
+        source_type=source_type,
+        bucket=bucket,
+        asset_key=key,
+        prefix=prefix,
+        original_filename=original_filename,
+        stored_filename=stored_filename,
+        content_type=content_type,
+        size_bytes=size_bytes,
+        storage_url=storage_url,
+        status="uploaded",
+    )
+    db.add(record)
+    db.commit()
+    db.refresh(record)
+    return record
+
+
+def serialize_asset_record(record: AssetRecord):
+    return {
+        "id": record.id,
+        "source_type": record.source_type,
+        "bucket": record.bucket,
+        "key": record.asset_key,
+        "prefix": record.prefix,
+        "original_filename": record.original_filename,
+        "stored_filename": record.stored_filename,
+        "content_type": record.content_type,
+        "size_bytes": record.size_bytes,
+        "storage_url": record.storage_url,
+        "status": record.status,
+        "created_at": record.created_at.isoformat() if record.created_at else None,
+    }
+
+
 @app.get("/health")
-def health():
-    return {"ok": True}
+def health(db: Session = Depends(get_db)):
+    total_records = db.scalar(select(func.count()).select_from(AssetRecord)) or 0
+    return {"ok": True, "asset_records": total_records}
+
+
+@app.get("/dashboard/summary")
+def dashboard_summary(db: Session = Depends(get_db)):
+    total_records = db.scalar(select(func.count()).select_from(AssetRecord)) or 0
+    latest_record = db.scalar(select(AssetRecord).order_by(desc(AssetRecord.id)).limit(1))
+    return {
+        "ok": True,
+        "bucket": os.getenv("S3_BUCKET"),
+        "storage_configured": bool(os.getenv("S3_BUCKET") and os.getenv("S3_ENDPOINT")),
+        "database_configured": bool(os.getenv("DATABASE_URL")),
+        "total_asset_records": total_records,
+        "latest_asset_record": serialize_asset_record(latest_record) if latest_record else None,
+    }
+
 
 @app.post("/assets/upload-text")
-def upload_text(payload: UploadTextRequest):
+def upload_text(payload: UploadTextRequest, db: Session = Depends(get_db)):
     client = get_s3_client()
     bucket = get_bucket_name()
 
     filename = payload.filename or f"{uuid.uuid4().hex}.txt"
-    key = f"{payload.prefix.strip('/')}/{filename}"
+    prefix = payload.prefix.strip("/") or "assets"
+    key = f"{prefix}/{filename}"
+    body = payload.text.encode("utf-8")
+    storage_url = build_object_url(key)
 
     try:
         client.put_object(
             Bucket=bucket,
             Key=key,
-            Body=payload.text.encode("utf-8"),
+            Body=body,
             ContentType="text/plain; charset=utf-8",
+        )
+        record = create_asset_record(
+            db,
+            source_type="text",
+            bucket=bucket,
+            key=key,
+            prefix=prefix,
+            original_filename=filename,
+            stored_filename=filename,
+            content_type="text/plain; charset=utf-8",
+            size_bytes=len(body),
+            storage_url=storage_url,
         )
         return {
             "ok": True,
             "bucket": bucket,
             "key": key,
-            "url": build_object_url(key),
+            "url": storage_url,
+            "record": serialize_asset_record(record),
         }
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/assets/upload-file")
 async def upload_file(
     file: UploadFile = File(...),
     prefix: str = Query("assets"),
+    db: Session = Depends(get_db),
 ):
     client = get_s3_client()
     bucket = get_bucket_name()
 
+    normalized_prefix = prefix.strip("/") or "assets"
     original_name = file.filename or "upload.bin"
     safe_name = f"{uuid.uuid4().hex}-{original_name}"
-    key = f"{prefix.strip('/')}/{safe_name}"
+    key = f"{normalized_prefix}/{safe_name}"
+    storage_url = build_object_url(key)
 
     try:
         content = await file.read()
@@ -88,6 +190,18 @@ async def upload_file(
             Body=content,
             ContentType=file.content_type or "application/octet-stream",
         )
+        record = create_asset_record(
+            db,
+            source_type="file",
+            bucket=bucket,
+            key=key,
+            prefix=normalized_prefix,
+            original_filename=original_name,
+            stored_filename=safe_name,
+            content_type=file.content_type or "application/octet-stream",
+            size_bytes=len(content),
+            storage_url=storage_url,
+        )
         return {
             "ok": True,
             "bucket": bucket,
@@ -95,22 +209,28 @@ async def upload_file(
             "filename": original_name,
             "content_type": file.content_type,
             "size": len(content),
-            "url": build_object_url(key),
+            "url": storage_url,
+            "record": serialize_asset_record(record),
         }
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         await file.close()
 
+
 @app.get("/assets/list")
-def list_assets(prefix: str = Query("assets"), limit: int = Query(20, ge=1, le=100)):
+def list_assets(
+    prefix: str = Query("assets"),
+    limit: int = Query(20, ge=1, le=100),
+):
     client = get_s3_client()
     bucket = get_bucket_name()
+    normalized_prefix = prefix.strip("/")
 
     try:
         response = client.list_objects_v2(
             Bucket=bucket,
-            Prefix=prefix.strip("/") + "/",
+            Prefix=f"{normalized_prefix}/" if normalized_prefix else "",
             MaxKeys=limit,
         )
         items = []
@@ -128,11 +248,33 @@ def list_assets(prefix: str = Query("assets"), limit: int = Query(20, ge=1, le=1
         return {
             "ok": True,
             "bucket": bucket,
-            "prefix": prefix,
+            "prefix": normalized_prefix,
             "items": items,
         }
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/assets/records")
+def list_asset_records(
+    prefix: str = Query("assets"),
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    normalized_prefix = prefix.strip("/")
+    statement = (
+        select(AssetRecord)
+        .where(AssetRecord.prefix == normalized_prefix)
+        .order_by(desc(AssetRecord.id))
+        .limit(limit)
+    )
+    records = db.scalars(statement).all()
+    return {
+        "ok": True,
+        "prefix": normalized_prefix,
+        "items": [serialize_asset_record(record) for record in records],
+    }
+
 
 @app.get("/assets/presign")
 def presign_get_url(
@@ -158,13 +300,20 @@ def presign_get_url(
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.delete("/assets")
-def delete_asset(key: str):
+def delete_asset(key: str, db: Session = Depends(get_db)):
     client = get_s3_client()
     bucket = get_bucket_name()
 
     try:
         client.delete_object(Bucket=bucket, Key=key)
+        record = db.scalar(
+            select(AssetRecord).where(AssetRecord.asset_key == key).order_by(desc(AssetRecord.id))
+        )
+        if record:
+            record.status = "deleted"
+            db.commit()
         return {
             "ok": True,
             "bucket": bucket,
