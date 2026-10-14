@@ -140,6 +140,33 @@ def create_asset_record(
     return record
 
 
+def ensure_asset_record_from_result(db: Session, task: TaskRecord, result: dict):
+    asset = result.get("asset") if isinstance(result, dict) else None
+    if not asset:
+        return None
+
+    asset_key = asset.get("key")
+    if not asset_key:
+        return None
+
+    existing = db.scalar(select(AssetRecord).where(AssetRecord.asset_key == asset_key))
+    if existing:
+        return existing
+
+    return create_asset_record(
+        db,
+        source_type=asset.get("source_type", "worker"),
+        bucket=asset.get("bucket", get_bucket_name()),
+        key=asset_key,
+        prefix=asset.get("prefix", "processed"),
+        original_filename=asset.get("original_filename", task.title),
+        stored_filename=asset.get("stored_filename", asset_key.split("/")[-1]),
+        content_type=asset.get("content_type", "video/mp4"),
+        size_bytes=int(asset.get("size_bytes", 0)),
+        storage_url=asset.get("storage_url", build_object_url(asset_key)),
+    )
+
+
 def serialize_asset_record(record: AssetRecord):
     return {
         "id": record.id,
@@ -746,6 +773,7 @@ def complete_task(task_id: int, payload: WorkerTaskCompleteRequest, db: Session 
     save_task_runtime_state(task, state)
 
     task.status = "success"
+    ensure_asset_record_from_result(db, task, payload.result)
     set_worker_idle_if_online(worker, f"最近完成任务 #{task.id}")
     worker.last_heartbeat_at = utcnow()
     db.commit()
