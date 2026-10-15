@@ -952,6 +952,33 @@ def list_workers(limit: int = Query(20, ge=1, le=100), db: Session = Depends(get
     return {"ok": True, "items": [serialize_worker_node(item) for item in items]}
 
 
+@app.delete("/workers/{worker_code}")
+def delete_worker(worker_code: str, db: Session = Depends(get_db)):
+    worker = get_worker_or_404(db, worker_code)
+
+    running_task = db.scalar(
+        select(TaskRecord)
+        .where(
+            TaskRecord.assigned_worker_code == worker_code,
+            TaskRecord.status == "running",
+        )
+        .limit(1)
+    )
+    if running_task:
+        raise HTTPException(status_code=409, detail="该 Worker 正在执行任务，不能直接删除")
+
+    assigned_tasks = db.scalars(
+        select(TaskRecord).where(TaskRecord.assigned_worker_code == worker_code)
+    ).all()
+    for task in assigned_tasks:
+        task.assigned_worker_code = ""
+
+    deleted_item = serialize_worker_node(worker)
+    db.delete(worker)
+    db.commit()
+    return {"ok": True, "item": deleted_item, "cleared_task_count": len(assigned_tasks)}
+
+
 @app.get("/workers/summary")
 def workers_summary(db: Session = Depends(get_db)):
     items = db.scalars(select(WorkerNode).order_by(desc(WorkerNode.id))).all()

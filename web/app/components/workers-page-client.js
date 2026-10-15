@@ -9,6 +9,7 @@ import {
   formatDate,
   inputStyle,
   readJson,
+  secondaryButtonStyle,
 } from "./dashboard-ui";
 
 const tableHeadStyle = {
@@ -94,6 +95,29 @@ export default function WorkersPageClient() {
       await reloadAll();
     } catch (error) {
       setMessage(error.message || "提交 Worker 心跳失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function deleteWorker(workerCode) {
+    const confirmed = window.confirm(`确认删除节点 ${workerCode} 吗？删除后任务分配下拉里也会移除它。`);
+    if (!confirmed) {
+      return;
+    }
+
+    setBusy(`delete-${workerCode}`);
+    setMessage(`正在删除节点 ${workerCode}...`);
+    try {
+      const data = await readJson(
+        await fetch(`/api/workers/${encodeURIComponent(workerCode)}`, {
+          method: "DELETE",
+        })
+      );
+      setMessage(`节点 ${workerCode} 已删除，已清理 ${data.cleared_task_count || 0} 条任务指派`);
+      await reloadAll();
+    } catch (error) {
+      setMessage(error.message || "删除 Worker 节点失败");
     } finally {
       setBusy("");
     }
@@ -225,12 +249,13 @@ export default function WorkersPageClient() {
                   <th style={tableHeadStyle}>当前任务</th>
                   <th style={tableHeadStyle}>备注</th>
                   <th style={{ ...tableHeadStyle, width: 170 }}>最近心跳</th>
+                  <th style={{ ...tableHeadStyle, width: 120 }}>操作</th>
                 </tr>
               </thead>
               <tbody>
                 {workers.length === 0 ? (
                   <tr>
-                    <td colSpan={5} style={{ ...tableCellStyle, color: "#94a3b8" }}>
+                    <td colSpan={6} style={{ ...tableCellStyle, color: "#94a3b8" }}>
                       还没有 Worker 节点。
                     </td>
                   </tr>
@@ -250,6 +275,20 @@ export default function WorkersPageClient() {
                       <td style={tableCellStyle}>{item.current_task_title || "-"}</td>
                       <td style={tableCellStyle}>{item.heartbeat_note || "-"}</td>
                       <td style={tableCellStyle}>{formatDate(item.last_heartbeat_at)}</td>
+                      <td style={tableCellStyle}>
+                        <button
+                          type="button"
+                          style={{
+                            ...secondaryButtonStyle,
+                            color: "#fca5a5",
+                            borderColor: "#7f1d1d",
+                          }}
+                          onClick={() => deleteWorker(item.worker_code)}
+                          disabled={busy === `delete-${item.worker_code}`}
+                        >
+                          {busy === `delete-${item.worker_code}` ? "删除中..." : "删除节点"}
+                        </button>
+                      </td>
                     </tr>
                   ))
                 )}
