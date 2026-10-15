@@ -157,6 +157,22 @@ function ResultLink({ href, label }) {
   );
 }
 
+function getSelectedWorkerCode(task, taskDrafts, workers) {
+  const draftedWorkerCode = taskDrafts[task.id]?.assigned_worker_code;
+  const currentWorkerCode = draftedWorkerCode ?? task.assigned_worker_code ?? "";
+
+  if (workers.length === 0) {
+    return "";
+  }
+
+  const matchedWorker = workers.find((worker) => worker.worker_code === currentWorkerCode);
+  if (matchedWorker) {
+    return matchedWorker.worker_code;
+  }
+
+  return workers[0].worker_code;
+}
+
 export default function TasksPageClient() {
   const [tasks, setTasks] = useState([]);
   const [workers, setWorkers] = useState([]);
@@ -169,6 +185,7 @@ export default function TasksPageClient() {
   });
   const [taskDrafts, setTaskDrafts] = useState({});
   const [taskFilter, setTaskFilter] = useState("");
+  const [pageSize, setPageSize] = useState("10");
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("已就绪");
   const [presignedUrls, setPresignedUrls] = useState({});
@@ -186,10 +203,13 @@ export default function TasksPageClient() {
     }
   }
 
-  async function loadTasks(status = taskFilter) {
+  async function loadTasks(status = taskFilter, limit = pageSize) {
     try {
       const data = await readJson(
-        await fetch(`/api/tasks?status=${encodeURIComponent(status)}`, { cache: "no-store" })
+        await fetch(
+          `/api/tasks?status=${encodeURIComponent(status)}&limit=${encodeURIComponent(limit)}`,
+          { cache: "no-store" }
+        )
       );
       setTasks(data.items || []);
     } catch (error) {
@@ -208,14 +228,14 @@ export default function TasksPageClient() {
     }
   }
 
-  async function reloadAll(status = taskFilter) {
+  async function reloadAll(status = taskFilter, limit = pageSize) {
     setMessage("正在刷新任务中心...");
-    await Promise.all([loadTaskSummary(), loadTasks(status), loadWorkers()]);
+    await Promise.all([loadTaskSummary(), loadTasks(status, limit), loadWorkers()]);
     setMessage("任务中心已刷新");
   }
 
   useEffect(() => {
-    reloadAll("");
+    reloadAll("", pageSize);
   }, []);
 
   function updateTaskDraft(taskId, field, value) {
@@ -261,7 +281,7 @@ export default function TasksPageClient() {
         })
       );
       setMessage(`任务已创建：#${data.item.id} ${data.item.title}`);
-      await reloadAll(taskFilter);
+      await reloadAll(taskFilter, pageSize);
     } catch (error) {
       setMessage(error.message || "创建任务失败");
     } finally {
@@ -294,7 +314,7 @@ export default function TasksPageClient() {
         created.push(`#${data.item.id}`);
       }
       setMessage(`批量任务已创建：${created.join("、")}`);
-      await reloadAll(taskFilter);
+      await reloadAll(taskFilter, pageSize);
     } catch (error) {
       setMessage(error.message || "批量创建任务失败");
     } finally {
@@ -326,7 +346,7 @@ export default function TasksPageClient() {
         return next;
       });
       setMessage(`任务已更新：#${data.item.id} -> ${data.item.status}`);
-      await reloadAll(taskFilter);
+      await reloadAll(taskFilter, pageSize);
     } catch (error) {
       setMessage(error.message || "更新任务失败");
     } finally {
@@ -344,7 +364,7 @@ export default function TasksPageClient() {
         })
       );
       setMessage(`任务已重试入队：#${data.item.id}`);
-      await reloadAll(taskFilter);
+      await reloadAll(taskFilter, pageSize);
     } catch (error) {
       setMessage(error.message || "任务重试失败");
     } finally {
@@ -409,7 +429,23 @@ export default function TasksPageClient() {
   return (
     <DashboardShell
       title="任务中心"
-      description="这里专门处理任务创建、状态流转、Worker 分配和失败重试。"
+      description={
+        <div style={{ display: "grid", gap: 10 }}>
+          <div>这里专门处理任务创建、状态流转、Worker 分配和失败重试。</div>
+          <div
+            style={{
+              padding: "10px 12px",
+              borderRadius: 10,
+              border: "1px solid #26314f",
+              background: "#0f172a",
+              color: "#cbd5e1",
+              fontSize: 13,
+            }}
+          >
+            当前消息：{message}
+          </div>
+        </div>
+      }
       action={
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <input
@@ -418,7 +454,22 @@ export default function TasksPageClient() {
             onChange={(event) => setTaskFilter(event.target.value)}
             placeholder="按状态过滤"
           />
-          <button type="button" style={buttonStyle} onClick={() => reloadAll(taskFilter)}>
+          <select
+            style={{ ...inputStyle, width: 110 }}
+            value={pageSize}
+            onChange={(event) => {
+              const nextValue = event.target.value;
+              setPageSize(nextValue);
+              reloadAll(taskFilter, nextValue);
+            }}
+          >
+            {["10", "20", "50", "100"].map((value) => (
+              <option key={value} value={value}>
+                每页 {value}
+              </option>
+            ))}
+          </select>
+          <button type="button" style={buttonStyle} onClick={() => reloadAll(taskFilter, pageSize)}>
             刷新任务
           </button>
         </div>
@@ -442,13 +493,30 @@ export default function TasksPageClient() {
         ))}
       </section>
 
-      <section
-        style={{
-          display: "grid",
-          gridTemplateColumns: "minmax(340px, 420px) minmax(0, 1fr)",
-          gap: 16,
-        }}
-      >
+      <div style={{ display: "grid", gap: 16 }}>
+        <Section
+          title="批量来源"
+          hint="每行一条来源地址，点一次就能把同一模板批量排进任务队列。"
+          action={
+            <div style={{ fontSize: 12, color: "#94a3b8" }}>
+              当前共 {batchSources.split(/\r?\n/).map((item) => item.trim()).filter(Boolean).length} 条
+            </div>
+          }
+        >
+          <div style={{ display: "grid", gap: 12 }}>
+            <textarea
+              style={{ ...inputStyle, minHeight: 132, resize: "vertical" }}
+              value={batchSources}
+              onChange={(event) => setBatchSources(event.target.value)}
+              placeholder={"每行一条来源地址\nhttps://www.youtube.com/shorts/xxx\nhttps://www.youtube.com/shorts/yyy"}
+            />
+            <div style={{ ...cardStyle, padding: 12, fontSize: 12, color: "#94a3b8" }}>
+              批量创建时会沿用下方“创建任务”里的 `title / priority / payload`，并自动生成 `-01 / -02 / -03`
+              这样的标题后缀。
+            </div>
+          </div>
+        </Section>
+
         <Section title="创建任务" hint="先把任务排进去，再交给 Worker 领取执行。">
           <form onSubmit={createTask} style={{ display: "grid", gap: 12 }}>
             <div style={{ display: "grid", gap: 10 }}>
@@ -522,183 +590,158 @@ export default function TasksPageClient() {
                 disabled={busy === "task" || busy === "batch"}
                 onClick={createBatchTasks}
               >
-                {busy === "batch" ? "批量创建中..." : "按下方来源批量创建"}
+                {busy === "batch" ? "批量创建中..." : "按上方来源批量创建"}
               </button>
             </div>
           </form>
         </Section>
 
-        <div style={{ display: "grid", gap: 16 }}>
-          <Section
-            title="批量来源"
-            hint="每行一条来源地址，点一次就能把同一模板批量排进任务队列。"
-            action={
-              <div style={{ fontSize: 12, color: "#94a3b8" }}>
-                当前共 {batchSources.split(/\r?\n/).map((item) => item.trim()).filter(Boolean).length} 条
-              </div>
-            }
-          >
-            <div style={{ display: "grid", gap: 12 }}>
-              <textarea
-                style={{ ...inputStyle, minHeight: 132, resize: "vertical" }}
-                value={batchSources}
-                onChange={(event) => setBatchSources(event.target.value)}
-                placeholder={"每行一条来源地址\nhttps://www.youtube.com/shorts/xxx\nhttps://www.youtube.com/shorts/yyy"}
-              />
-              <div style={{ ...cardStyle, padding: 12, fontSize: 12, color: "#94a3b8" }}>
-                批量创建时会沿用左侧当前表单里的 `title / priority / payload`，并自动生成 `-01 / -02 / -03`
-                这样的标题后缀。
-              </div>
-            </div>
-          </Section>
-
-          <Section title="任务队列" hint="这里保留运营最常用的列：状态、分配、尝试次数、重试。">
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-                <thead>
+        <Section title="任务队列" hint="这里保留运营最常用的列：状态、分配、尝试次数、重试。">
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+              <thead>
+                <tr>
+                  <th style={{ ...tableHeadStyle, width: 70 }}>ID</th>
+                  <th style={tableHeadStyle}>任务</th>
+                  <th style={{ ...tableHeadStyle, width: 320 }}>产物</th>
+                  <th style={{ ...tableHeadStyle, width: 130 }}>状态</th>
+                  <th style={{ ...tableHeadStyle, width: 160 }}>Worker</th>
+                  <th style={{ ...tableHeadStyle, width: 150 }}>尝试情况</th>
+                  <th style={{ ...tableHeadStyle, width: 220 }}>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tasks.length === 0 ? (
                   <tr>
-                    <th style={{ ...tableHeadStyle, width: 70 }}>ID</th>
-                    <th style={tableHeadStyle}>任务</th>
-                    <th style={{ ...tableHeadStyle, width: 320 }}>产物</th>
-                    <th style={{ ...tableHeadStyle, width: 130 }}>状态</th>
-                    <th style={{ ...tableHeadStyle, width: 160 }}>Worker</th>
-                    <th style={{ ...tableHeadStyle, width: 150 }}>尝试情况</th>
-                    <th style={{ ...tableHeadStyle, width: 220 }}>操作</th>
+                    <td colSpan={7} style={{ ...tableCellStyle, color: "#94a3b8" }}>
+                      当前筛选条件下还没有任务。
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {tasks.length === 0 ? (
-                    <tr>
-                      <td colSpan={7} style={{ ...tableCellStyle, color: "#94a3b8" }}>
-                        当前筛选条件下还没有任务。
-                      </td>
-                    </tr>
-                  ) : (
-                    tasks.map((item) => {
-                      const outputInfo = getTaskOutputInfo(item);
-                      return (
-                        <tr key={item.id}>
-                          <td style={tableCellStyle}>{item.id}</td>
-                          <td style={tableCellStyle}>
-                            <div>{item.title}</div>
-                            <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
-                              {item.source_type} / {item.source_value || "-"}
-                            </div>
-                          </td>
-                          <td style={tableCellStyle}>
-                            {item.status === "success" && (outputInfo.localFinalPath || outputInfo.r2Url) ? (
-                              <div style={{ display: "grid", gap: 8 }}>
-                                {outputInfo.localFinalPath ? (
-                                  <div style={outputPathStyle}>
-                                    <div style={{ color: "#94a3b8", marginBottom: 4 }}>本地文件路径</div>
-                                    <div>{outputInfo.localFinalPath}</div>
+                ) : (
+                  tasks.map((item) => {
+                    const outputInfo = getTaskOutputInfo(item);
+                    const selectedWorkerCode = getSelectedWorkerCode(item, taskDrafts, workers);
+                    return (
+                      <tr key={item.id}>
+                        <td style={tableCellStyle}>{item.id}</td>
+                        <td style={tableCellStyle}>
+                          <div>{item.title}</div>
+                          <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
+                            {item.source_type} / {item.source_value || "-"}
+                          </div>
+                        </td>
+                        <td style={tableCellStyle}>
+                          {item.status === "success" && (outputInfo.localFinalPath || outputInfo.r2Url) ? (
+                            <div style={{ display: "grid", gap: 8 }}>
+                              {outputInfo.localFinalPath ? (
+                                <div style={outputPathStyle}>
+                                  <div style={{ color: "#94a3b8", marginBottom: 4 }}>本地文件路径</div>
+                                  <div>{outputInfo.localFinalPath}</div>
+                                </div>
+                              ) : null}
+                              {outputInfo.r2Key ? (
+                                <div style={outputPathStyle}>
+                                  <div style={{ color: "#94a3b8", marginBottom: 4 }}>R2 下载</div>
+                                  <button
+                                    type="button"
+                                    style={secondaryButtonStyle}
+                                    onClick={() => openPresignedUrl(item.id, outputInfo.r2Key)}
+                                    disabled={busy === `presign-${item.id}`}
+                                  >
+                                    {busy === `presign-${item.id}` ? "生成中..." : "生成预签名链接"}
+                                  </button>
+                                  <div style={{ marginTop: 8, color: "#94a3b8" }}>
+                                    Key: {outputInfo.r2Key}
                                   </div>
-                                ) : null}
-                                {outputInfo.r2Key ? (
-                                  <div style={outputPathStyle}>
-                                    <div style={{ color: "#94a3b8", marginBottom: 4 }}>R2 下载</div>
-                                    <button
-                                      type="button"
-                                      style={secondaryButtonStyle}
-                                      onClick={() => openPresignedUrl(item.id, outputInfo.r2Key)}
-                                      disabled={busy === `presign-${item.id}`}
-                                    >
-                                      {busy === `presign-${item.id}` ? "生成中..." : "生成预签名链接"}
-                                    </button>
-                                    <div style={{ marginTop: 8, color: "#94a3b8" }}>
-                                      Key: {outputInfo.r2Key}
+                                  {presignedUrls[item.id] ? (
+                                    <div style={{ marginTop: 8 }}>
+                                      <ResultLink
+                                        href={presignedUrls[item.id]}
+                                        label="打开最近一次生成的下载链接"
+                                      />
                                     </div>
-                                    {presignedUrls[item.id] ? (
-                                      <div style={{ marginTop: 8 }}>
-                                        <ResultLink
-                                          href={presignedUrls[item.id]}
-                                          label="打开最近一次生成的下载链接"
-                                        />
-                                      </div>
-                                    ) : null}
-                                  </div>
-                                ) : null}
-                              </div>
-                            ) : (
-                              <div style={{ fontSize: 12, color: "#94a3b8" }}>
-                                {item.status === "success" ? "本次任务暂无产物信息" : "任务成功后会在这里显示本地路径和 R2 链接"}
-                              </div>
-                            )}
-                          </td>
-                          <td style={tableCellStyle}>
-                            <select
-                              style={inputStyle}
-                              value={taskDrafts[item.id]?.status ?? item.status}
-                              onChange={(event) => updateTaskDraft(item.id, "status", event.target.value)}
-                            >
-                              {taskStatusOptions.map((status) => (
-                                <option key={status} value={status}>
-                                  {status}
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-                          <td style={tableCellStyle}>
-                            <select
-                              style={inputStyle}
-                              value={taskDrafts[item.id]?.assigned_worker_code ?? item.assigned_worker_code ?? ""}
-                              onChange={(event) =>
-                                updateTaskDraft(item.id, "assigned_worker_code", event.target.value)
-                              }
-                            >
+                                  ) : null}
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : (
+                            <div style={{ fontSize: 12, color: "#94a3b8" }}>
+                              {item.status === "success" ? "本次任务暂无产物信息" : "任务成功后会在这里显示本地路径和 R2 链接"}
+                            </div>
+                          )}
+                        </td>
+                        <td style={tableCellStyle}>
+                          <select
+                            style={inputStyle}
+                            value={taskDrafts[item.id]?.status ?? item.status}
+                            onChange={(event) => updateTaskDraft(item.id, "status", event.target.value)}
+                          >
+                            {taskStatusOptions.map((status) => (
+                              <option key={status} value={status}>
+                                {status}
+                              </option>
+                            ))}
+                          </select>
+                        </td>
+                        <td style={tableCellStyle}>
+                          <select
+                            style={inputStyle}
+                            value={selectedWorkerCode}
+                            onChange={(event) =>
+                              updateTaskDraft(item.id, "assigned_worker_code", event.target.value)
+                            }
+                          >
+                            {workers.length === 0 ? (
                               <option value="">未分配</option>
-                              {workers.map((worker) => (
+                            ) : (
+                              workers.map((worker) => (
                                 <option key={worker.worker_code} value={worker.worker_code}>
                                   {worker.display_name}
                                 </option>
-                              ))}
-                            </select>
-                          </td>
-                          <td style={tableCellStyle}>
-                            <div>尝试 {item.attempt_count || 0}</div>
-                            <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
-                              重试 {item.retry_count || 0}/{item.max_retries || 0}
-                            </div>
-                            {item.last_error ? (
-                              <div style={{ marginTop: 4, fontSize: 12, color: "#fca5a5" }}>{item.last_error}</div>
-                            ) : null}
-                          </td>
-                          <td style={tableCellStyle}>
-                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                              ))
+                            )}
+                          </select>
+                        </td>
+                        <td style={tableCellStyle}>
+                          <div>尝试 {item.attempt_count || 0}</div>
+                          <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
+                            重试 {item.retry_count || 0}/{item.max_retries || 0}
+                          </div>
+                          {item.last_error ? (
+                            <div style={{ marginTop: 4, fontSize: 12, color: "#fca5a5" }}>{item.last_error}</div>
+                          ) : null}
+                        </td>
+                        <td style={tableCellStyle}>
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                            <button
+                              type="button"
+                              style={buttonStyle}
+                              onClick={() => saveTaskUpdate(item)}
+                              disabled={busy === `task-${item.id}`}
+                            >
+                              {busy === `task-${item.id}` ? "保存中..." : "保存"}
+                            </button>
+                            {["failed", "cancelled", "success"].includes(item.status) ? (
                               <button
                                 type="button"
-                                style={buttonStyle}
-                                onClick={() => saveTaskUpdate(item)}
-                                disabled={busy === `task-${item.id}`}
+                                style={secondaryButtonStyle}
+                                onClick={() => retryTask(item.id)}
+                                disabled={busy === `retry-${item.id}`}
                               >
-                                {busy === `task-${item.id}` ? "保存中..." : "保存"}
+                                {busy === `retry-${item.id}` ? "重试中..." : "手动重试"}
                               </button>
-                              {["failed", "cancelled", "success"].includes(item.status) ? (
-                                <button
-                                  type="button"
-                                  style={secondaryButtonStyle}
-                                  onClick={() => retryTask(item.id)}
-                                  disabled={busy === `retry-${item.id}`}
-                                >
-                                  {busy === `retry-${item.id}` ? "重试中..." : "手动重试"}
-                                </button>
-                              ) : null}
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </Section>
-        </div>
-      </section>
-
-      <Section title="当前消息" hint="最近一次创建、更新或重试结果。">
-        <div style={{ fontSize: 14, color: "#e2e8f0", wordBreak: "break-word" }}>{message}</div>
-      </Section>
+                            ) : null}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </Section>
+      </div>
     </DashboardShell>
   );
 }
