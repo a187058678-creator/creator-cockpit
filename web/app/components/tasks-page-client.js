@@ -171,6 +171,7 @@ export default function TasksPageClient() {
   const [taskFilter, setTaskFilter] = useState("");
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("已就绪");
+  const [presignedUrls, setPresignedUrls] = useState({});
   const [taskForm, setTaskForm] = useState(() => quickTaskPresets[0].form);
   const [batchSources, setBatchSources] = useState(
     "https://www.youtube.com/shorts/QfZnSS1hgy0"
@@ -346,6 +347,33 @@ export default function TasksPageClient() {
       await reloadAll(taskFilter);
     } catch (error) {
       setMessage(error.message || "任务重试失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function openPresignedUrl(taskId, key) {
+    if (!key) {
+      setMessage("当前任务缺少 R2 key");
+      return;
+    }
+
+    setBusy(`presign-${taskId}`);
+    setMessage(`正在生成任务 #${taskId} 的下载链接...`);
+    try {
+      const data = await readJson(
+        await fetch(`/api/assets/presign?key=${encodeURIComponent(key)}`, {
+          cache: "no-store",
+        })
+      );
+      setPresignedUrls((prev) => ({
+        ...prev,
+        [taskId]: data.url,
+      }));
+      window.open(data.url, "_blank", "noopener,noreferrer");
+      setMessage(`任务 #${taskId} 的预签名链接已生成`);
+    } catch (error) {
+      setMessage(error.message || "生成预签名链接失败");
     } finally {
       setBusy("");
     }
@@ -566,13 +594,26 @@ export default function TasksPageClient() {
                                     <div>{outputInfo.localFinalPath}</div>
                                   </div>
                                 ) : null}
-                                {outputInfo.r2Url ? (
+                                {outputInfo.r2Key ? (
                                   <div style={outputPathStyle}>
-                                    <div style={{ color: "#94a3b8", marginBottom: 4 }}>R2 文件链接</div>
-                                    <ResultLink href={outputInfo.r2Url} label={outputInfo.r2Url} />
-                                    {outputInfo.r2Key ? (
-                                      <div style={{ marginTop: 6, color: "#94a3b8" }}>
-                                        Key: {outputInfo.r2Key}
+                                    <div style={{ color: "#94a3b8", marginBottom: 4 }}>R2 下载</div>
+                                    <button
+                                      type="button"
+                                      style={secondaryButtonStyle}
+                                      onClick={() => openPresignedUrl(item.id, outputInfo.r2Key)}
+                                      disabled={busy === `presign-${item.id}`}
+                                    >
+                                      {busy === `presign-${item.id}` ? "生成中..." : "生成预签名链接"}
+                                    </button>
+                                    <div style={{ marginTop: 8, color: "#94a3b8" }}>
+                                      Key: {outputInfo.r2Key}
+                                    </div>
+                                    {presignedUrls[item.id] ? (
+                                      <div style={{ marginTop: 8 }}>
+                                        <ResultLink
+                                          href={presignedUrls[item.id]}
+                                          label="打开最近一次生成的下载链接"
+                                        />
                                       </div>
                                     ) : null}
                                   </div>
