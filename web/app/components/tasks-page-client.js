@@ -26,15 +26,61 @@ const tableCellStyle = {
 };
 
 const outputPathStyle = {
-  marginTop: 6,
-  padding: "8px 10px",
+  padding: "6px 10px",
   borderRadius: 8,
   border: "1px solid #26314f",
   background: "#0f172a",
   color: "#cbd5e1",
   fontSize: 12,
-  lineHeight: 1.6,
-  wordBreak: "break-all",
+  lineHeight: 1.45,
+};
+
+const compactInfoLabelStyle = {
+  color: "#94a3b8",
+  flex: "0 0 auto",
+};
+
+const compactInfoValueStyle = {
+  minWidth: 0,
+  flex: "1 1 auto",
+  whiteSpace: "nowrap",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+};
+
+const compactInfoButtonStyle = {
+  ...secondaryButtonStyle,
+  padding: "6px 10px",
+  fontSize: 12,
+};
+
+function CopyableInfoRow({ label, value, copyValue, onClick, title }) {
+  if (!value) {
+    return null;
+  }
+
+  const handleClick = onClick ?? (() => {});
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      title={title || value}
+      style={{
+        ...outputPathStyle,
+        width: "100%",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        textAlign: "left",
+        cursor: "pointer",
+      }}
+      data-copy-value={copyValue || value}
+    >
+      <span style={compactInfoLabelStyle}>{label}</span>
+      <span style={compactInfoValueStyle}>{value}</span>
+    </button>
+  );
 };
 
 function buildTaskPayload(profile = "balanced") {
@@ -157,6 +203,45 @@ function ResultLink({ href, label }) {
   );
 }
 
+function PresignedLinkRow({ label, href, onGenerate, generating, copyValue, onCopy }) {
+  return (
+    <div
+      style={{
+        ...outputPathStyle,
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        paddingTop: 5,
+        paddingBottom: 5,
+      }}
+    >
+      <span style={compactInfoLabelStyle}>{label}</span>
+      <span style={{ ...compactInfoValueStyle, color: href ? "#cbd5e1" : "#64748b" }}>
+        {href || copyValue || "点击生成下载链接"}
+      </span>
+      {href ? (
+        <>
+          <a
+            href={href}
+            target="_blank"
+            rel="noreferrer"
+            style={{ color: "#818cf8", textDecoration: "none", whiteSpace: "nowrap" }}
+          >
+            打开
+          </a>
+          <button type="button" style={compactInfoButtonStyle} onClick={onCopy}>
+            复制
+          </button>
+        </>
+      ) : (
+        <button type="button" style={compactInfoButtonStyle} onClick={onGenerate}>
+          {generating ? "生成中..." : "生成链接"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function getSelectedWorkerCode(task, taskDrafts, workers) {
   const draftedWorkerCode = taskDrafts[task.id]?.assigned_worker_code;
   const currentWorkerCode = draftedWorkerCode ?? task.assigned_worker_code ?? "";
@@ -237,6 +322,18 @@ export default function TasksPageClient() {
   useEffect(() => {
     reloadAll("", pageSize);
   }, []);
+
+  async function copyText(value, successText) {
+    if (!value) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(value);
+      setMessage(successText || "已复制");
+    } catch (error) {
+      setMessage(error.message || "复制失败");
+    }
+  }
 
   function updateTaskDraft(taskId, field, value) {
     setTaskDrafts((prev) => ({
@@ -430,48 +527,49 @@ export default function TasksPageClient() {
     <DashboardShell
       title="任务中心"
       description={
-        <div style={{ display: "grid", gap: 10 }}>
-          <div>这里专门处理任务创建、状态流转、Worker 分配和失败重试。</div>
+        <div>这里专门处理任务创建、状态流转、Worker 分配和失败重试。</div>
+      }
+      action={
+        <div style={{ display: "grid", gap: 10, minWidth: "min(100%, 560px)" }}>
           <div
             style={{
-              padding: "10px 12px",
+              padding: "8px 12px",
               borderRadius: 10,
               border: "1px solid #26314f",
               background: "#0f172a",
               color: "#cbd5e1",
               fontSize: 13,
+              lineHeight: 1.3,
             }}
           >
             当前消息：{message}
           </div>
-        </div>
-      }
-      action={
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <input
-            style={{ ...inputStyle, width: 160 }}
-            value={taskFilter}
-            onChange={(event) => setTaskFilter(event.target.value)}
-            placeholder="按状态过滤"
-          />
-          <select
-            style={{ ...inputStyle, width: 110 }}
-            value={pageSize}
-            onChange={(event) => {
-              const nextValue = event.target.value;
-              setPageSize(nextValue);
-              reloadAll(taskFilter, nextValue);
-            }}
-          >
-            {["10", "20", "50", "100"].map((value) => (
-              <option key={value} value={value}>
-                每页 {value}
-              </option>
-            ))}
-          </select>
-          <button type="button" style={buttonStyle} onClick={() => reloadAll(taskFilter, pageSize)}>
-            刷新任务
-          </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <input
+              style={{ ...inputStyle, width: 160 }}
+              value={taskFilter}
+              onChange={(event) => setTaskFilter(event.target.value)}
+              placeholder="按状态过滤"
+            />
+            <select
+              style={{ ...inputStyle, width: 110 }}
+              value={pageSize}
+              onChange={(event) => {
+                const nextValue = event.target.value;
+                setPageSize(nextValue);
+                reloadAll(taskFilter, nextValue);
+              }}
+            >
+              {["10", "20", "50", "100"].map((value) => (
+                <option key={value} value={value}>
+                  每页 {value}
+                </option>
+              ))}
+            </select>
+            <button type="button" style={buttonStyle} onClick={() => reloadAll(taskFilter, pageSize)}>
+              刷新任务
+            </button>
+          </div>
         </div>
       }
     >
@@ -521,7 +619,7 @@ export default function TasksPageClient() {
           <form onSubmit={createTask} style={{ display: "grid", gap: 12 }}>
             <div style={{ display: "grid", gap: 10 }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: "#cbd5e1" }}>快捷预设</div>
-              <div style={{ display: "grid", gap: 8 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
                 {quickTaskPresets.map((preset) => (
                   <button
                     key={preset.key}
@@ -531,6 +629,7 @@ export default function TasksPageClient() {
                       textAlign: "left",
                       display: "grid",
                       gap: 4,
+                      padding: "10px 14px",
                     }}
                     onClick={() => applyQuickPreset(preset)}
                   >
@@ -632,36 +731,30 @@ export default function TasksPageClient() {
                         </td>
                         <td style={tableCellStyle}>
                           {item.status === "success" && (outputInfo.localFinalPath || outputInfo.r2Url) ? (
-                            <div style={{ display: "grid", gap: 8 }}>
+                            <div style={{ display: "grid", gap: 6 }}>
                               {outputInfo.localFinalPath ? (
-                                <div style={outputPathStyle}>
-                                  <div style={{ color: "#94a3b8", marginBottom: 4 }}>本地文件路径</div>
-                                  <div>{outputInfo.localFinalPath}</div>
-                                </div>
+                                <CopyableInfoRow
+                                  label="本地文件路径"
+                                  value={outputInfo.localFinalPath}
+                                  onClick={() =>
+                                    copyText(outputInfo.localFinalPath, `已复制本地路径：任务 ${item.id}`)
+                                  }
+                                />
                               ) : null}
                               {outputInfo.r2Key ? (
-                                <div style={outputPathStyle}>
-                                  <div style={{ color: "#94a3b8", marginBottom: 4 }}>R2 下载</div>
-                                  <button
-                                    type="button"
-                                    style={secondaryButtonStyle}
-                                    onClick={() => openPresignedUrl(item.id, outputInfo.r2Key)}
-                                    disabled={busy === `presign-${item.id}`}
-                                  >
-                                    {busy === `presign-${item.id}` ? "生成中..." : "生成预签名链接"}
-                                  </button>
-                                  <div style={{ marginTop: 8, color: "#94a3b8" }}>
-                                    Key: {outputInfo.r2Key}
-                                  </div>
-                                  {presignedUrls[item.id] ? (
-                                    <div style={{ marginTop: 8 }}>
-                                      <ResultLink
-                                        href={presignedUrls[item.id]}
-                                        label="打开最近一次生成的下载链接"
-                                      />
-                                    </div>
-                                  ) : null}
-                                </div>
+                                <PresignedLinkRow
+                                  label="R2 下载"
+                                  href={presignedUrls[item.id] || ""}
+                                  copyValue={outputInfo.r2Key}
+                                  generating={busy === `presign-${item.id}`}
+                                  onGenerate={() => openPresignedUrl(item.id, outputInfo.r2Key)}
+                                  onCopy={() =>
+                                    copyText(
+                                      presignedUrls[item.id] || outputInfo.r2Key,
+                                      `已复制 R2 信息：任务 ${item.id}`
+                                    )
+                                  }
+                                />
                               ) : null}
                             </div>
                           ) : (
