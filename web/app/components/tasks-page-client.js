@@ -156,6 +156,9 @@ function buildTaskPayload(profile = "balanced") {
     execution: {
       max_retries: 2,
       simulate_fail: false,
+      required_capabilities: ["yt-dlp", "ffmpeg", "upload-r2"],
+      preferred_worker_codes: [],
+      lease_timeout_seconds: 1800,
     },
     dedupe: {
       enabled: true,
@@ -175,7 +178,84 @@ function buildTaskFormPreset({ title, sourceValue, profile = "balanced" }) {
     source_value: sourceValue,
     priority: "high",
     group_id: "",
+    required_capabilities: "yt-dlp,ffmpeg,upload-r2",
+    preferred_worker_codes: "",
+    lease_timeout_seconds: "1800",
     payload: JSON.stringify(buildTaskPayload(profile), null, 2),
+  };
+}
+
+function buildAgentFlowPayload() {
+  return {
+    schema_version: "creator-task/v1",
+    source: {
+      asset_key: "",
+      start_seconds: 0,
+      end_seconds: 0,
+    },
+    publish: {
+      platforms: ["tiktok"],
+      need_subtitles: false,
+    },
+    output: {
+      prefix: "agent-flow",
+      target_height: 720,
+      video_codec: "libx264",
+      audio_codec: "aac",
+    },
+    execution: {
+      max_retries: 1,
+      simulate_fail: false,
+      required_capabilities: ["llm-agent"],
+      preferred_worker_codes: [],
+      lease_timeout_seconds: 1800,
+    },
+    agent_flow: {
+      goal: "选题/提示词优化/发布文案生成",
+      topic_seed: "围绕AI短视频批量起号，生成可连续扩写的内容方向",
+      platform: "tiktok",
+      audience: "想做AI视频副业的新手创作者",
+      tone: "高点击、强反差、适合短视频口播",
+      language: "zh-CN",
+      reference_prompt: "",
+      reference_copy: "",
+      deepseek: {
+        enabled: true,
+        model: "deepseek-chat",
+        temperature: 0.8,
+        max_topics: 5,
+      },
+      video: {
+        enabled: false,
+        provider: "agnes",
+        model: "agnes-video-2.5-flash",
+        seconds: "5",
+        size: "1280x720",
+        poll_timeout_seconds: 120,
+        poll_interval_seconds: 10,
+      },
+    },
+    dedupe: {
+      enabled: false,
+      profile: "balanced",
+      seed: 0,
+      randomize: true,
+    },
+  };
+}
+
+function buildAgentFlowFormPreset() {
+  return {
+    title: "AI智能体-选题提示词文案生成",
+    task_type: "agent_flow",
+    source_type: "manual",
+    source_value: "账号定位：AI短视频批量起号；目标：先生成可直接投喂视频模型和发布中心的文案骨架",
+    priority: "high",
+    group_id: "",
+    required_capabilities: "llm-agent",
+    preferred_worker_codes: "",
+    lease_timeout_seconds: "1800",
+    payload: JSON.stringify(buildAgentFlowPayload(), null, 2),
   };
 }
 
@@ -199,6 +279,12 @@ const quickTaskPresets = [
       sourceValue: "https://www.youtube.com/shorts/QfZnSS1hgy0",
       profile: "aggressive",
     }),
+  },
+  {
+    key: "agent_flow_copy",
+    label: "AI文案工作流",
+    hint: "生成选题、视频提示词和发布文案，默认不触发视频生成，适合先自己验证。",
+    form: buildAgentFlowFormPreset(),
   },
 ];
 
@@ -297,6 +383,13 @@ function getSelectedWorkerCode(task, taskDrafts, workers) {
   }
 
   return workers[0].worker_code;
+}
+
+function parseCsvInput(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 export default function TasksPageClient() {
@@ -406,12 +499,19 @@ export default function TasksPageClient() {
 
   function buildTaskRequest(sourceValue, index = 0) {
     const suffix = index > 0 ? `-${String(index + 1).padStart(2, "0")}` : "";
+    const payload = parseTaskPayload();
+    payload.execution = {
+      ...(payload.execution || {}),
+      required_capabilities: parseCsvInput(taskForm.required_capabilities),
+      preferred_worker_codes: parseCsvInput(taskForm.preferred_worker_codes),
+      lease_timeout_seconds: Number(taskForm.lease_timeout_seconds || 1800),
+    };
     return {
       ...taskForm,
       title: `${taskForm.title}${suffix}`,
       source_value: sourceValue,
       group_id: taskForm.group_id ? Number(taskForm.group_id) : null,
-      payload: parseTaskPayload(),
+      payload,
     };
   }
 
@@ -757,6 +857,32 @@ export default function TasksPageClient() {
                 placeholder="来源地址"
               />
             </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1.2fr .6fr", gap: 12 }}>
+              <input
+                style={inputStyle}
+                value={taskForm.required_capabilities}
+                onChange={(event) =>
+                  setTaskForm((prev) => ({ ...prev, required_capabilities: event.target.value }))
+                }
+                placeholder="所需能力，逗号分隔"
+              />
+              <input
+                style={inputStyle}
+                value={taskForm.preferred_worker_codes}
+                onChange={(event) =>
+                  setTaskForm((prev) => ({ ...prev, preferred_worker_codes: event.target.value }))
+                }
+                placeholder="绑定 Worker，可留空"
+              />
+              <input
+                style={inputStyle}
+                value={taskForm.lease_timeout_seconds}
+                onChange={(event) =>
+                  setTaskForm((prev) => ({ ...prev, lease_timeout_seconds: event.target.value }))
+                }
+                placeholder="租约秒数"
+              />
+            </div>
             <textarea
               style={{ ...inputStyle, minHeight: 140, resize: "vertical" }}
               value={taskForm.payload}
@@ -822,6 +948,9 @@ export default function TasksPageClient() {
                           </div>
                           <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
                             组 {item.group_id || "-"} / 创建人 {item.created_by_user_id || "-"} / 最近触发 {item.triggered_by_user_id || "-"}
+                          </div>
+                          <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
+                            调度能力 {(item.payload?.execution?.required_capabilities || []).join(", ") || "-"} / 绑定 Worker {(item.payload?.execution?.preferred_worker_codes || []).join(", ") || "自动"} / 租约 {item.payload?.execution?.lease_timeout_seconds || 1800}s
                           </div>
                         </td>
                         <td style={tableCellStyle}>

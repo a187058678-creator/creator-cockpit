@@ -212,6 +212,8 @@ class WorkerNode(Base):
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="idle")
     machine_info: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
     capabilities: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    max_parallel_tasks: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    scheduler_weight: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
     current_task_title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
     heartbeat_note: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
     last_heartbeat_at: Mapped[DateTime] = mapped_column(

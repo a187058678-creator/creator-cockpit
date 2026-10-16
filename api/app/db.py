@@ -57,6 +57,8 @@ def ensure_runtime_columns():
         },
         "worker_nodes": {
             "group_id": 'ALTER TABLE worker_nodes ADD COLUMN group_id INTEGER',
+            "max_parallel_tasks": 'ALTER TABLE worker_nodes ADD COLUMN max_parallel_tasks INTEGER DEFAULT 1',
+            "scheduler_weight": 'ALTER TABLE worker_nodes ADD COLUMN scheduler_weight INTEGER DEFAULT 100',
         },
     }
     inspector = inspect(engine)

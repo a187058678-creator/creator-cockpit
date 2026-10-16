@@ -176,9 +176,38 @@ def build_task_payload_defaults(profile: str = "balanced") -> dict:
         "execution": {
             "max_retries": 2,
             "simulate_fail": False,
+            "required_capabilities": [],
+            "preferred_worker_codes": [],
+            "lease_timeout_seconds": 1800,
+        },
+        "agent_flow": {
+            "goal": "选题/提示词优化/发布文案生成",
+            "topic_seed": "",
+            "platform": "tiktok",
+            "audience": "",
+            "tone": "短视频爆款",
+            "language": "zh-CN",
+            "reference_prompt": "",
+            "reference_copy": "",
+            "deepseek": {
+                "enabled": True,
+                "model": "deepseek-chat",
+                "temperature": 0.8,
+                "max_topics": 5,
+            },
+            "video": {
+                "enabled": False,
+                "provider": "agnes",
+                "model": "agnes-video-2.5-flash",
+                "seconds": "5",
+                "size": "1280x720",
+                "poll_timeout_seconds": 120,
+                "poll_interval_seconds": 10,
+            },
         },
         "dedupe": get_dedupe_profile_defaults(profile),
     }
+
 
 
 def normalize_task_payload(raw_payload: Any) -> dict:
@@ -194,11 +223,12 @@ def normalize_task_payload(raw_payload: Any) -> dict:
         "publish": payload.get("publish") if isinstance(payload.get("publish"), dict) else {},
         "output": payload.get("output") if isinstance(payload.get("output"), dict) else {},
         "execution": payload.get("execution") if isinstance(payload.get("execution"), dict) else {},
+        "agent_flow": payload.get("agent_flow") if isinstance(payload.get("agent_flow"), dict) else {},
         "dedupe": payload.get("dedupe") if isinstance(payload.get("dedupe"), dict) else {},
     }
     deep_merge_dict(normalized, new_shape)
 
-    legacy_shape = {"source": {}, "publish": {}, "output": {}, "execution": {}, "dedupe": {}}
+    legacy_shape = {"source": {}, "publish": {}, "output": {}, "execution": {}, "agent_flow": {}, "dedupe": {}}
     if "asset_key" in payload:
         legacy_shape["source"]["asset_key"] = payload.get("asset_key")
     if "clip_start_seconds" in payload or "source_start_seconds" in payload:
@@ -217,6 +247,28 @@ def normalize_task_payload(raw_payload: Any) -> dict:
         legacy_shape["execution"]["max_retries"] = payload.get("max_retries")
     if "simulate_fail" in payload:
         legacy_shape["execution"]["simulate_fail"] = payload.get("simulate_fail")
+    if "required_capabilities" in payload:
+        legacy_shape["execution"]["required_capabilities"] = payload.get("required_capabilities")
+    if "preferred_worker_codes" in payload:
+        legacy_shape["execution"]["preferred_worker_codes"] = payload.get("preferred_worker_codes")
+    if "lease_timeout_seconds" in payload:
+        legacy_shape["execution"]["lease_timeout_seconds"] = payload.get("lease_timeout_seconds")
+    if "goal" in payload:
+        legacy_shape["agent_flow"]["goal"] = payload.get("goal")
+    if "topic_seed" in payload:
+        legacy_shape["agent_flow"]["topic_seed"] = payload.get("topic_seed")
+    if "platform_name" in payload:
+        legacy_shape["agent_flow"]["platform"] = payload.get("platform_name")
+    if "audience" in payload:
+        legacy_shape["agent_flow"]["audience"] = payload.get("audience")
+    if "tone" in payload:
+        legacy_shape["agent_flow"]["tone"] = payload.get("tone")
+    if "language" in payload:
+        legacy_shape["agent_flow"]["language"] = payload.get("language")
+    if "reference_prompt" in payload:
+        legacy_shape["agent_flow"]["reference_prompt"] = payload.get("reference_prompt")
+    if "reference_copy" in payload:
+        legacy_shape["agent_flow"]["reference_copy"] = payload.get("reference_copy")
     if "profile" in payload:
         legacy_shape["dedupe"]["profile"] = payload.get("profile")
     if "trim_start_seconds" in payload:
@@ -246,6 +298,43 @@ def normalize_task_payload(raw_payload: Any) -> dict:
 
     normalized["execution"]["max_retries"] = clamp_int(normalized["execution"].get("max_retries"), 2, 0, 10)
     normalized["execution"]["simulate_fail"] = coerce_bool(normalized["execution"].get("simulate_fail"), False)
+    normalized["execution"]["required_capabilities"] = ensure_str_list(
+        normalized["execution"].get("required_capabilities")
+    )
+    normalized["execution"]["preferred_worker_codes"] = ensure_str_list(
+        normalized["execution"].get("preferred_worker_codes")
+    )
+    normalized["execution"]["lease_timeout_seconds"] = clamp_int(
+        normalized["execution"].get("lease_timeout_seconds"),
+        1800,
+        60,
+        86400,
+    )
+    normalized["agent_flow"]["goal"] = str(normalized["agent_flow"].get("goal") or "").strip()
+    normalized["agent_flow"]["topic_seed"] = str(normalized["agent_flow"].get("topic_seed") or "").strip()
+    normalized["agent_flow"]["platform"] = str(normalized["agent_flow"].get("platform") or "tiktok").strip() or "tiktok"
+    normalized["agent_flow"]["audience"] = str(normalized["agent_flow"].get("audience") or "").strip()
+    normalized["agent_flow"]["tone"] = str(normalized["agent_flow"].get("tone") or "短视频爆款").strip() or "短视频爆款"
+    normalized["agent_flow"]["language"] = str(normalized["agent_flow"].get("language") or "zh-CN").strip() or "zh-CN"
+    normalized["agent_flow"]["reference_prompt"] = str(
+        normalized["agent_flow"].get("reference_prompt") or ""
+    ).strip()
+    normalized["agent_flow"]["reference_copy"] = str(
+        normalized["agent_flow"].get("reference_copy") or ""
+    ).strip()
+    deepseek_config = normalized["agent_flow"].setdefault("deepseek", {})
+    deepseek_config["enabled"] = coerce_bool(deepseek_config.get("enabled"), True)
+    deepseek_config["model"] = str(deepseek_config.get("model") or "deepseek-chat").strip() or "deepseek-chat"
+    deepseek_config["temperature"] = clamp_float(deepseek_config.get("temperature"), 0.8, 0.0, 2.0)
+    deepseek_config["max_topics"] = clamp_int(deepseek_config.get("max_topics"), 5, 1, 20)
+    video_config = normalized["agent_flow"].setdefault("video", {})
+    video_config["enabled"] = coerce_bool(video_config.get("enabled"), False)
+    video_config["provider"] = str(video_config.get("provider") or "agnes").strip() or "agnes"
+    video_config["model"] = str(video_config.get("model") or "agnes-video-2.5-flash").strip() or "agnes-video-2.5-flash"
+    video_config["seconds"] = str(video_config.get("seconds") or "5").strip() or "5"
+    video_config["size"] = str(video_config.get("size") or "1280x720").strip() or "1280x720"
+    video_config["poll_timeout_seconds"] = clamp_int(video_config.get("poll_timeout_seconds"), 120, 10, 3600)
+    video_config["poll_interval_seconds"] = clamp_int(video_config.get("poll_interval_seconds"), 10, 2, 300)
 
     normalized_profile = str(normalized["dedupe"].get("profile") or "balanced").strip().lower()
     if normalized_profile not in ALLOWED_DEDUPE_PROFILES:
@@ -350,9 +439,11 @@ class WorkerClient:
         self.machine_info = env("WORKER_MACHINE_INFO", "Windows Worker")
         self.capabilities = [
             item.strip()
-            for item in env("WORKER_CAPABILITIES", "yt-dlp,ffmpeg,ffprobe,upload-r2").split(",")
+            for item in env("WORKER_CAPABILITIES", "yt-dlp,ffmpeg,ffprobe,upload-r2,llm-agent").split(",")
             if item.strip()
         ]
+        self.max_parallel_tasks = env_int("WORKER_MAX_PARALLEL_TASKS", 1, 1)
+        self.scheduler_weight = env_int("WORKER_SCHEDULER_WEIGHT", 100, 1)
         self.worker_token = env("WORKER_TOKEN")
         self.idle_status = env("WORKER_IDLE_STATUS", "idle")
         self.poll_interval_seconds = env_int("WORKER_POLL_INTERVAL_SECONDS", 10, 3)
@@ -390,6 +481,8 @@ class WorkerClient:
                 "display_name": self.display_name,
                 "machine_info": self.machine_info,
                 "capabilities": self.capabilities,
+                "max_parallel_tasks": self.max_parallel_tasks,
+                "scheduler_weight": self.scheduler_weight,
                 "heartbeat_note": "Worker 启动完成，已通过 Token 注册",
             },
             require_token=True,
@@ -402,6 +495,8 @@ class WorkerClient:
             "status": status,
             "machine_info": self.machine_info,
             "capabilities": self.capabilities,
+            "max_parallel_tasks": self.max_parallel_tasks,
+            "scheduler_weight": self.scheduler_weight,
             "current_task_title": current_task_title,
             "heartbeat_note": heartbeat_note,
         }
@@ -436,6 +531,12 @@ class WorkerProcessor:
         self.ytdlp_bin = env("YTDLP_BIN", "yt-dlp")
         self.ffmpeg_bin = env("FFMPEG_BIN", "ffmpeg")
         self.ffprobe_bin = env("FFPROBE_BIN", "ffprobe")
+        self.deepseek_api_key = env("DEEPSEEK_API_KEY")
+        self.deepseek_base_url = env("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+        self.deepseek_model = env("DEEPSEEK_MODEL", "deepseek-chat")
+        self.agnes_video_api_key = env("AGNES_VIDEO_API_KEY")
+        self.agnes_video_base_url = env("AGNES_VIDEO_BASE_URL", "https://apihub.agnes-ai.com/v1")
+        self.agnes_video_model = env("AGNES_VIDEO_MODEL", "agnes-video-2.5-flash")
         self.s3_bucket = env("S3_BUCKET")
         self.s3_region = env("S3_REGION", "auto")
         self.s3_endpoint = env("S3_ENDPOINT")
@@ -463,6 +564,244 @@ class WorkerProcessor:
 
     def get_payload(self, task: dict) -> dict:
         return normalize_task_payload(task.get("payload") or {})
+
+    def get_agent_flow_input(self, task: dict) -> dict:
+        payload = self.get_payload(task)
+        agent_flow = payload["agent_flow"]
+        return {
+            "goal": agent_flow["goal"] or "选题/提示词优化/发布文案生成",
+            "topic_seed": agent_flow["topic_seed"] or task.get("source_value") or task.get("title") or "",
+            "platform": agent_flow["platform"],
+            "audience": agent_flow["audience"],
+            "tone": agent_flow["tone"],
+            "language": agent_flow["language"],
+            "reference_prompt": agent_flow["reference_prompt"],
+            "reference_copy": agent_flow["reference_copy"],
+            "source_value": task.get("source_value") or "",
+            "task_title": task.get("title") or "",
+        }
+
+    def strip_json_fence(self, text: str) -> str:
+        normalized = text.strip()
+        if normalized.startswith("```"):
+            lines = normalized.splitlines()
+            if lines:
+                lines = lines[1:]
+            if lines and lines[-1].strip().startswith("```"):
+                lines = lines[:-1]
+            normalized = "\n".join(lines).strip()
+        return normalized
+
+    def call_deepseek_chat(self, body: dict) -> dict:
+        if not self.deepseek_api_key:
+            raise RuntimeError("缺少 DEEPSEEK_API_KEY，无法执行 agent_flow 文案工作流")
+
+        response = self.client.session.post(
+            f"{self.deepseek_base_url.rstrip('/')}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.deepseek_api_key}",
+                "Content-Type": "application/json",
+            },
+            json=body,
+            timeout=180,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def run_deepseek_agent_flow(self, task: dict) -> dict:
+        payload = self.get_payload(task)
+        config = payload["agent_flow"]["deepseek"]
+        if not config.get("enabled", True):
+            return {"enabled": False, "message": "DeepSeek 文案工作流已禁用"}
+
+        agent_input = self.get_agent_flow_input(task)
+        self.heartbeat(task, "正在调用 DeepSeek 生成选题与文案")
+        body = {
+            "model": config.get("model") or self.deepseek_model,
+            "temperature": float(config.get("temperature") or 0.8),
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "你是短视频增长运营策划。请基于用户提供的信息，输出严格 JSON，不要输出额外说明。"
+                        "JSON 字段必须包含：selected_topic、topic_options、optimized_prompt、publish_copy、video_prompt。"
+                        "其中 topic_options 为数组；publish_copy 内包含 title、hook、caption、hashtags。"
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "goal": agent_input["goal"],
+                            "topic_seed": agent_input["topic_seed"],
+                            "platform": agent_input["platform"],
+                            "audience": agent_input["audience"],
+                            "tone": agent_input["tone"],
+                            "language": agent_input["language"],
+                            "reference_prompt": agent_input["reference_prompt"],
+                            "reference_copy": agent_input["reference_copy"],
+                            "task_title": agent_input["task_title"],
+                            "source_value": agent_input["source_value"],
+                            "max_topics": int(config.get("max_topics") or 5),
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+        }
+        data = self.call_deepseek_chat(body)
+        content = (
+            (((data.get("choices") or [{}])[0].get("message") or {}).get("content"))
+            or "{}"
+        )
+        content = self.strip_json_fence(str(content))
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError:
+            parsed = {
+                "selected_topic": agent_input["topic_seed"],
+                "topic_options": [agent_input["topic_seed"]],
+                "optimized_prompt": content,
+                "publish_copy": {
+                    "title": agent_input["task_title"] or "AI 生成文案",
+                    "hook": "",
+                    "caption": content,
+                    "hashtags": [],
+                },
+                "video_prompt": content,
+            }
+
+        publish_copy = parsed.get("publish_copy") if isinstance(parsed.get("publish_copy"), dict) else {}
+        publish_copy["hashtags"] = ensure_str_list(publish_copy.get("hashtags"))
+        parsed["publish_copy"] = publish_copy
+        parsed["topic_options"] = ensure_str_list(parsed.get("topic_options"))
+        parsed["model"] = body["model"]
+        parsed["provider"] = "deepseek"
+        parsed["raw_response_id"] = data.get("id") or ""
+        return parsed
+
+    def extract_agnes_video_url(self, data: dict) -> str:
+        candidates = [
+            data.get("video_url"),
+            data.get("url"),
+            ((data.get("output") or {}) if isinstance(data.get("output"), dict) else {}).get("url"),
+        ]
+        output = data.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if isinstance(item, dict):
+                    candidates.extend([item.get("url"), item.get("video_url")])
+        data_list = data.get("data")
+        if isinstance(data_list, list):
+            for item in data_list:
+                if isinstance(item, dict):
+                    candidates.extend([item.get("url"), item.get("video_url")])
+        for item in candidates:
+            value = str(item or "").strip()
+            if value:
+                return value
+        return ""
+
+    def poll_agnes_video_task(self, task: dict, video_id: str, model_name: str, timeout_seconds: int, interval_seconds: int) -> dict:
+        base_root = self.agnes_video_base_url.rstrip("/")
+        if base_root.endswith("/v1"):
+            base_root = base_root[:-3]
+        deadline = time.monotonic() + timeout_seconds
+        latest = {"video_id": video_id, "model": model_name, "status": "submitted"}
+        while time.monotonic() < deadline:
+            self.heartbeat(task, f"正在轮询 Agnes 视频任务 {video_id}")
+            response = self.client.session.get(
+                f"{base_root}/agnesapi",
+                params={"video_id": video_id, "model_name": model_name},
+                headers={"Authorization": f"Bearer {self.agnes_video_api_key}"},
+                timeout=120,
+            )
+            response.raise_for_status()
+            latest = response.json()
+            status = str(latest.get("status") or "").lower()
+            if status in {"succeeded", "success", "completed"}:
+                latest["video_url"] = self.extract_agnes_video_url(latest)
+                return latest
+            if status in {"failed", "error", "cancelled"}:
+                raise RuntimeError(f"Agnes 视频生成失败：{json.dumps(latest, ensure_ascii=False)}")
+            time.sleep(interval_seconds)
+
+        latest["status"] = latest.get("status") or "queued"
+        latest["timed_out"] = True
+        return latest
+
+    def run_agnes_video_flow(self, task: dict, video_prompt: str) -> dict:
+        payload = self.get_payload(task)
+        config = payload["agent_flow"]["video"]
+        if not config.get("enabled"):
+            return {"enabled": False, "message": "Agnes 异步视频生成未启用"}
+        if not self.agnes_video_api_key:
+            raise RuntimeError("缺少 AGNES_VIDEO_API_KEY，无法提交 Agnes Video 任务")
+
+        self.heartbeat(task, "正在提交 Agnes 异步视频生成任务")
+        model_name = config.get("model") or self.agnes_video_model
+        request_body = {
+            "model": model_name,
+            "prompt": video_prompt,
+            "seconds": str(config.get("seconds") or "5"),
+            "size": str(config.get("size") or "1280x720"),
+        }
+        response = self.client.session.post(
+            f"{self.agnes_video_base_url.rstrip('/')}/videos",
+            headers={
+                "Authorization": f"Bearer {self.agnes_video_api_key}",
+                "Content-Type": "application/json",
+            },
+            json=request_body,
+            timeout=180,
+        )
+        response.raise_for_status()
+        created = response.json()
+        video_id = str(created.get("video_id") or created.get("id") or "").strip()
+        result = {
+            "provider": "agnes",
+            "model": model_name,
+            "request": request_body,
+            "create_response": created,
+        }
+        if not video_id:
+            return result
+
+        polled = self.poll_agnes_video_task(
+            task,
+            video_id=video_id,
+            model_name=model_name,
+            timeout_seconds=clamp_int(config.get("poll_timeout_seconds"), 120, 10, 3600),
+            interval_seconds=clamp_int(config.get("poll_interval_seconds"), 10, 2, 300),
+        )
+        result["video_id"] = video_id
+        result["retrieve_response"] = polled
+        result["status"] = polled.get("status") or created.get("status") or "queued"
+        result["video_url"] = self.extract_agnes_video_url(polled)
+        return result
+
+    def run_agent_flow(self, task: dict) -> dict:
+        payload = self.get_payload(task)
+        deepseek_result = self.run_deepseek_agent_flow(task)
+        video_prompt = str(
+            deepseek_result.get("video_prompt")
+            or deepseek_result.get("optimized_prompt")
+            or self.get_agent_flow_input(task)["topic_seed"]
+        ).strip()
+        agnes_result = self.run_agnes_video_flow(task, video_prompt)
+        return {
+            "processed_by": self.client.worker_code,
+            "completed_at": now_iso(),
+            "workflow_type": "agent_flow",
+            "task_payload": payload,
+            "agent_flow": {
+                "goal": payload["agent_flow"]["goal"],
+                "deepseek": deepseek_result,
+                "video": agnes_result,
+            },
+            "message": "Agent Flow 已完成选题 / 提示词优化 / 发布文案生成流程",
+        }
 
     def get_dedupe_plan(self, task: dict, clip_width: int, clip_height: int) -> DedupePlan:
         payload = self.get_payload(task)
@@ -955,7 +1294,11 @@ def main():
                 time.sleep(client.poll_interval_seconds)
                 continue
 
-            result = processor.run_real_pipeline(task)
+            task_type = str(task.get("task_type") or "").strip().lower()
+            if task_type == "agent_flow":
+                result = processor.run_agent_flow(task)
+            else:
+                result = processor.run_real_pipeline(task)
             response = client.complete_task(task["id"], result)
             print(f"[{now_iso()}] 任务 #{task['id']} 完成：{json.dumps(response, ensure_ascii=False)}")
             client.heartbeat(

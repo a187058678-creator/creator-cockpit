@@ -174,6 +174,34 @@ def build_task_payload_defaults(profile: str = "balanced") -> dict:
         "execution": {
             "max_retries": 2,
             "simulate_fail": False,
+            "required_capabilities": [],
+            "preferred_worker_codes": [],
+            "lease_timeout_seconds": get_task_lease_timeout_seconds(),
+        },
+        "agent_flow": {
+            "goal": "选题/提示词优化/发布文案生成",
+            "topic_seed": "",
+            "platform": "tiktok",
+            "audience": "",
+            "tone": "短视频爆款",
+            "language": "zh-CN",
+            "reference_prompt": "",
+            "reference_copy": "",
+            "deepseek": {
+                "enabled": True,
+                "model": "deepseek-chat",
+                "temperature": 0.8,
+                "max_topics": 5,
+            },
+            "video": {
+                "enabled": False,
+                "provider": "agnes",
+                "model": "agnes-video-2.5-flash",
+                "seconds": "5",
+                "size": "1280x720",
+                "poll_timeout_seconds": 120,
+                "poll_interval_seconds": 10,
+            },
         },
         "dedupe": get_dedupe_profile_defaults(profile),
     }
@@ -192,11 +220,12 @@ def normalize_task_payload(raw_payload: Any) -> dict:
         "publish": payload.get("publish") if isinstance(payload.get("publish"), dict) else {},
         "output": payload.get("output") if isinstance(payload.get("output"), dict) else {},
         "execution": payload.get("execution") if isinstance(payload.get("execution"), dict) else {},
+        "agent_flow": payload.get("agent_flow") if isinstance(payload.get("agent_flow"), dict) else {},
         "dedupe": payload.get("dedupe") if isinstance(payload.get("dedupe"), dict) else {},
     }
     deep_merge_dict(normalized, new_shape)
 
-    legacy_shape = {"source": {}, "publish": {}, "output": {}, "execution": {}, "dedupe": {}}
+    legacy_shape = {"source": {}, "publish": {}, "output": {}, "execution": {}, "agent_flow": {}, "dedupe": {}}
     if "asset_key" in payload:
         legacy_shape["source"]["asset_key"] = payload.get("asset_key")
     if "clip_start_seconds" in payload or "source_start_seconds" in payload:
@@ -215,6 +244,28 @@ def normalize_task_payload(raw_payload: Any) -> dict:
         legacy_shape["execution"]["max_retries"] = payload.get("max_retries")
     if "simulate_fail" in payload:
         legacy_shape["execution"]["simulate_fail"] = payload.get("simulate_fail")
+    if "required_capabilities" in payload:
+        legacy_shape["execution"]["required_capabilities"] = payload.get("required_capabilities")
+    if "preferred_worker_codes" in payload:
+        legacy_shape["execution"]["preferred_worker_codes"] = payload.get("preferred_worker_codes")
+    if "lease_timeout_seconds" in payload:
+        legacy_shape["execution"]["lease_timeout_seconds"] = payload.get("lease_timeout_seconds")
+    if "goal" in payload:
+        legacy_shape["agent_flow"]["goal"] = payload.get("goal")
+    if "topic_seed" in payload:
+        legacy_shape["agent_flow"]["topic_seed"] = payload.get("topic_seed")
+    if "platform_name" in payload:
+        legacy_shape["agent_flow"]["platform"] = payload.get("platform_name")
+    if "audience" in payload:
+        legacy_shape["agent_flow"]["audience"] = payload.get("audience")
+    if "tone" in payload:
+        legacy_shape["agent_flow"]["tone"] = payload.get("tone")
+    if "language" in payload:
+        legacy_shape["agent_flow"]["language"] = payload.get("language")
+    if "reference_prompt" in payload:
+        legacy_shape["agent_flow"]["reference_prompt"] = payload.get("reference_prompt")
+    if "reference_copy" in payload:
+        legacy_shape["agent_flow"]["reference_copy"] = payload.get("reference_copy")
     if "profile" in payload:
         legacy_shape["dedupe"]["profile"] = payload.get("profile")
     if "trim_start_seconds" in payload:
@@ -270,6 +321,43 @@ def normalize_task_payload(raw_payload: Any) -> dict:
         normalized["execution"].get("simulate_fail"),
         False,
     )
+    normalized["execution"]["required_capabilities"] = ensure_str_list(
+        normalized["execution"].get("required_capabilities")
+    )
+    normalized["execution"]["preferred_worker_codes"] = ensure_str_list(
+        normalized["execution"].get("preferred_worker_codes")
+    )
+    normalized["execution"]["lease_timeout_seconds"] = clamp_int(
+        normalized["execution"].get("lease_timeout_seconds"),
+        get_task_lease_timeout_seconds(),
+        60,
+        86400,
+    )
+    normalized["agent_flow"]["goal"] = str(normalized["agent_flow"].get("goal") or "").strip()
+    normalized["agent_flow"]["topic_seed"] = str(normalized["agent_flow"].get("topic_seed") or "").strip()
+    normalized["agent_flow"]["platform"] = str(normalized["agent_flow"].get("platform") or "tiktok").strip() or "tiktok"
+    normalized["agent_flow"]["audience"] = str(normalized["agent_flow"].get("audience") or "").strip()
+    normalized["agent_flow"]["tone"] = str(normalized["agent_flow"].get("tone") or "短视频爆款").strip() or "短视频爆款"
+    normalized["agent_flow"]["language"] = str(normalized["agent_flow"].get("language") or "zh-CN").strip() or "zh-CN"
+    normalized["agent_flow"]["reference_prompt"] = str(
+        normalized["agent_flow"].get("reference_prompt") or ""
+    ).strip()
+    normalized["agent_flow"]["reference_copy"] = str(
+        normalized["agent_flow"].get("reference_copy") or ""
+    ).strip()
+    deepseek_config = normalized["agent_flow"].setdefault("deepseek", {})
+    deepseek_config["enabled"] = coerce_bool(deepseek_config.get("enabled"), True)
+    deepseek_config["model"] = str(deepseek_config.get("model") or "deepseek-chat").strip() or "deepseek-chat"
+    deepseek_config["temperature"] = clamp_float(deepseek_config.get("temperature"), 0.8, 0.0, 2.0)
+    deepseek_config["max_topics"] = clamp_int(deepseek_config.get("max_topics"), 5, 1, 20)
+    video_config = normalized["agent_flow"].setdefault("video", {})
+    video_config["enabled"] = coerce_bool(video_config.get("enabled"), False)
+    video_config["provider"] = str(video_config.get("provider") or "agnes").strip() or "agnes"
+    video_config["model"] = str(video_config.get("model") or "agnes-video-2.5-flash").strip() or "agnes-video-2.5-flash"
+    video_config["seconds"] = str(video_config.get("seconds") or "5").strip() or "5"
+    video_config["size"] = str(video_config.get("size") or "1280x720").strip() or "1280x720"
+    video_config["poll_timeout_seconds"] = clamp_int(video_config.get("poll_timeout_seconds"), 120, 10, 3600)
+    video_config["poll_interval_seconds"] = clamp_int(video_config.get("poll_interval_seconds"), 10, 2, 300)
 
     normalized_profile = str(normalized["dedupe"].get("profile") or "balanced").strip().lower()
     if normalized_profile not in ALLOWED_DEDUPE_PROFILES:
@@ -375,6 +463,8 @@ class WorkerHeartbeatRequest(BaseModel):
     group_id: Optional[int] = None
     machine_info: str = ""
     capabilities: list[str] = []
+    max_parallel_tasks: int = Field(default=1, ge=1, le=8)
+    scheduler_weight: int = Field(default=100, ge=1, le=1000)
     current_task_title: str = ""
     heartbeat_note: str = ""
 
@@ -462,6 +552,8 @@ class WorkerRegisterRequest(BaseModel):
     display_name: str
     machine_info: str = ""
     capabilities: list[str] = []
+    max_parallel_tasks: int = Field(default=1, ge=1, le=8)
+    scheduler_weight: int = Field(default=100, ge=1, le=1000)
     heartbeat_note: str = ""
 
 
@@ -493,6 +585,14 @@ def get_worker_offline_timeout_seconds() -> int:
         return max(30, int(raw_value))
     except ValueError:
         return 180
+
+
+def get_task_lease_timeout_seconds() -> int:
+    raw_value = os.getenv("TASK_LEASE_TIMEOUT_SECONDS", "1800")
+    try:
+        return max(60, int(raw_value))
+    except ValueError:
+        return 1800
 
 
 def build_object_url(key: str) -> str:
@@ -700,6 +800,60 @@ def load_json_field(raw_value: str, fallback):
         return fallback
 
 
+def get_task_required_capabilities(record: TaskRecord) -> list[str]:
+    payload = normalize_task_payload(load_json_field(record.payload_json, {}))
+    return ensure_str_list(payload.get("execution", {}).get("required_capabilities"))
+
+
+def get_task_preferred_worker_codes(record: TaskRecord) -> list[str]:
+    payload = normalize_task_payload(load_json_field(record.payload_json, {}))
+    return ensure_str_list(payload.get("execution", {}).get("preferred_worker_codes"))
+
+
+def get_task_lease_timeout(record: TaskRecord) -> int:
+    payload = normalize_task_payload(load_json_field(record.payload_json, {}))
+    return clamp_int(
+        payload.get("execution", {}).get("lease_timeout_seconds"),
+        get_task_lease_timeout_seconds(),
+        60,
+        86400,
+    )
+
+
+def get_worker_capabilities(record: WorkerNode) -> list[str]:
+    return ensure_str_list(load_json_field(record.capabilities, []))
+
+
+def count_worker_running_tasks(db: Session, worker_code: str) -> int:
+    return db.scalar(
+        select(func.count())
+        .select_from(TaskRecord)
+        .where(TaskRecord.assigned_worker_code == worker_code, TaskRecord.status == "running")
+    ) or 0
+
+
+def get_worker_available_slots(db: Session, record: WorkerNode) -> int:
+    running_count = count_worker_running_tasks(db, record.worker_code)
+    return max(0, int(record.max_parallel_tasks or 1) - running_count)
+
+
+def worker_can_claim_task(worker: WorkerNode, task: TaskRecord) -> tuple[bool, str]:
+    required_capabilities = set(get_task_required_capabilities(task))
+    worker_capabilities = set(get_worker_capabilities(worker))
+    missing_capabilities = sorted(required_capabilities - worker_capabilities)
+    if missing_capabilities:
+        return False, f"缺少能力：{', '.join(missing_capabilities)}"
+
+    preferred_worker_codes = get_task_preferred_worker_codes(task)
+    if preferred_worker_codes and worker.worker_code not in preferred_worker_codes:
+        return False, "当前任务已绑定其他 Worker"
+
+    if task.assigned_worker_code and task.assigned_worker_code != worker.worker_code:
+        return False, "当前任务已分配给其他 Worker"
+
+    return True, ""
+
+
 def utcnow():
     return datetime.now(timezone.utc)
 
@@ -774,6 +928,7 @@ def get_effective_worker_status(record: WorkerNode) -> str:
 
 def serialize_worker_node(record: WorkerNode):
     effective_status = get_effective_worker_status(record)
+    capabilities = get_worker_capabilities(record)
     return {
         "id": record.id,
         "worker_code": record.worker_code,
@@ -782,7 +937,10 @@ def serialize_worker_node(record: WorkerNode):
         "status": effective_status,
         "reported_status": record.status,
         "machine_info": record.machine_info,
-        "capabilities": json.loads(record.capabilities or "[]"),
+        "capabilities": capabilities,
+        "max_parallel_tasks": int(record.max_parallel_tasks or 1),
+        "scheduler_weight": int(record.scheduler_weight or 100),
+        "dispatch_tags": capabilities,
         "current_task_title": record.current_task_title,
         "heartbeat_note": record.heartbeat_note,
         "last_heartbeat_at": record.last_heartbeat_at.isoformat() if record.last_heartbeat_at else None,
@@ -895,6 +1053,92 @@ def set_worker_idle_if_online(record: WorkerNode, note: str):
     if get_effective_worker_status(record) != "offline":
         record.status = "idle"
     record.heartbeat_note = note
+
+
+def sync_worker_dispatch_state(db: Session, record: WorkerNode, note: str, current_task_title: str = ""):
+    running_count = count_worker_running_tasks(db, record.worker_code)
+    if running_count > 0:
+        record.status = "running"
+        record.current_task_title = current_task_title or record.current_task_title
+    else:
+        record.current_task_title = ""
+        if get_effective_worker_status(record) != "offline":
+            record.status = "idle"
+    record.heartbeat_note = note
+
+
+def recover_stale_task_leases(db: Session, *, group_id: Optional[int] = None) -> int:
+    statement = select(TaskRecord).where(
+        TaskRecord.status == "running",
+        TaskRecord.assigned_worker_code != "",
+    )
+    if group_id is not None:
+        statement = statement.where(TaskRecord.group_id == group_id)
+
+    recovered_count = 0
+    for task in db.scalars(statement).all():
+        worker = db.scalar(select(WorkerNode).where(WorkerNode.worker_code == task.assigned_worker_code))
+        updated_at = task.updated_at or task.created_at or utcnow()
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        lease_expired = updated_at + timedelta(seconds=get_task_lease_timeout(task)) < utcnow()
+        worker_offline = worker is None or get_effective_worker_status(worker) == "offline"
+        if not lease_expired and not worker_offline:
+            continue
+
+        previous_status = task.status
+        state = get_task_runtime_state(task)
+        state["last_error"] = "任务租约超时或 Worker 离线，已自动回收到队列"
+        append_task_history(
+            state,
+            "lease_recovered",
+            worker_code=task.assigned_worker_code,
+            worker_offline=worker_offline,
+            lease_timeout_seconds=get_task_lease_timeout(task),
+        )
+        save_task_runtime_state(task, state)
+        task.status = "queued"
+        task.assigned_worker_code = ""
+        create_task_execution_record(
+            db,
+            task_id=task.id,
+            group_id=task.group_id,
+            event_type="lease_recovered",
+            status_before=previous_status,
+            status_after=task.status,
+            worker_code=worker.worker_code if worker else "",
+            attempt_count=int(state.get("attempt_count", 0)),
+            retry_count=int(state.get("retry_count", 0)),
+            error_message=state["last_error"],
+            detail={"worker_offline": worker_offline},
+        )
+        if worker:
+            sync_worker_dispatch_state(db, worker, f"任务 #{task.id} 已被调度器回收")
+        recovered_count += 1
+
+    return recovered_count
+
+
+def select_claimable_task_for_worker(db: Session, worker: WorkerNode, group_id: Optional[int]) -> Optional[TaskRecord]:
+    statement = (
+        select(TaskRecord)
+        .where(TaskRecord.status.in_(["pending", "queued"]))
+        .order_by(
+            case((TaskRecord.assigned_worker_code == worker.worker_code, 0), else_=1),
+            case((TaskRecord.priority == "high", 0), else_=1),
+            TaskRecord.id,
+        )
+        .limit(100)
+    )
+    if group_id is not None:
+        statement = statement.where(TaskRecord.group_id == group_id)
+
+    for task in db.scalars(statement).all():
+        can_claim, _ = worker_can_claim_task(worker, task)
+        if can_claim:
+            return task
+
+    return None
 
 
 def get_worker_or_404(db: Session, worker_code: str) -> WorkerNode:
@@ -1630,6 +1874,8 @@ def register_worker(
             status="idle",
             machine_info=payload.machine_info.strip(),
             capabilities=json.dumps(payload.capabilities, ensure_ascii=False),
+            max_parallel_tasks=payload.max_parallel_tasks,
+            scheduler_weight=payload.scheduler_weight,
             current_task_title="",
             heartbeat_note=payload.heartbeat_note.strip() or "Worker 已完成注册",
             last_heartbeat_at=utcnow(),
@@ -1641,6 +1887,8 @@ def register_worker(
         record.status = "idle"
         record.machine_info = payload.machine_info.strip()
         record.capabilities = json.dumps(payload.capabilities, ensure_ascii=False)
+        record.max_parallel_tasks = payload.max_parallel_tasks
+        record.scheduler_weight = payload.scheduler_weight
         record.heartbeat_note = payload.heartbeat_note.strip() or "Worker 已重新注册"
         record.last_heartbeat_at = utcnow()
 
@@ -1651,7 +1899,12 @@ def register_worker(
         target_id=worker_code,
         actor_type="worker",
         actor_code=worker_code,
-        detail={"worker_token_id": token_record.id, "group_id": token_record.group_id},
+        detail={
+            "worker_token_id": token_record.id,
+            "group_id": token_record.group_id,
+            "max_parallel_tasks": payload.max_parallel_tasks,
+            "scheduler_weight": payload.scheduler_weight,
+        },
     )
     db.commit()
     db.refresh(record)
@@ -2123,6 +2376,8 @@ def worker_heartbeat(
             status=payload.status,
             machine_info=payload.machine_info,
             capabilities=json.dumps(payload.capabilities, ensure_ascii=False),
+            max_parallel_tasks=payload.max_parallel_tasks,
+            scheduler_weight=payload.scheduler_weight,
             current_task_title=payload.current_task_title,
             heartbeat_note=payload.heartbeat_note,
             last_heartbeat_at=datetime.now(timezone.utc),
@@ -2134,6 +2389,8 @@ def worker_heartbeat(
         record.status = payload.status
         record.machine_info = payload.machine_info
         record.capabilities = json.dumps(payload.capabilities, ensure_ascii=False)
+        record.max_parallel_tasks = payload.max_parallel_tasks
+        record.scheduler_weight = payload.scheduler_weight
         record.current_task_title = payload.current_task_title
         record.heartbeat_note = payload.heartbeat_note
         record.last_heartbeat_at = datetime.now(timezone.utc)
@@ -2157,7 +2414,14 @@ def list_workers(
         resolve_group_scope(db, actor_user, group_id),
     )
     items = db.scalars(statement).all()
-    return {"ok": True, "items": [serialize_worker_node(item) for item in items]}
+    serialized_items = []
+    for item in items:
+        serialized = serialize_worker_node(item)
+        running_task_count = count_worker_running_tasks(db, item.worker_code)
+        serialized["running_task_count"] = running_task_count
+        serialized["available_slots"] = max(0, serialized["max_parallel_tasks"] - running_task_count)
+        serialized_items.append(serialized)
+    return {"ok": True, "items": serialized_items}
 
 
 @app.delete("/workers/{worker_code}")
@@ -2222,11 +2486,16 @@ def workers_summary(
     online = len([item for item in items if get_effective_worker_status(item) in ["idle", "running", "online"]])
     offline = total - online
     latest = items[0] if items else None
+    total_slots = sum(max(1, int(item.max_parallel_tasks or 1)) for item in items)
+    busy_slots = sum(count_worker_running_tasks(db, item.worker_code) for item in items)
     return {
         "ok": True,
         "total": total,
         "online": online,
         "offline": offline,
+        "total_slots": total_slots,
+        "busy_slots": busy_slots,
+        "available_slots": max(0, total_slots - busy_slots),
         "latest": serialize_worker_node(latest) if latest else None,
     }
 
@@ -2257,6 +2526,17 @@ def update_task(
                 raise HTTPException(status_code=404, detail="指定的 Worker 不存在")
             if worker_record.group_id != record.group_id:
                 raise HTTPException(status_code=409, detail="指定 Worker 不属于当前任务账号组")
+            missing_capabilities = sorted(
+                set(get_task_required_capabilities(record)) - set(get_worker_capabilities(worker_record))
+            )
+            if missing_capabilities:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"指定 Worker 缺少任务能力：{', '.join(missing_capabilities)}",
+                )
+            preferred_worker_codes = get_task_preferred_worker_codes(record)
+            if preferred_worker_codes and normalized_worker_code not in preferred_worker_codes:
+                raise HTTPException(status_code=409, detail="当前任务已绑定其他 Worker")
             record.assigned_worker_code = normalized_worker_code
         else:
             record.assigned_worker_code = ""
@@ -2272,10 +2552,7 @@ def update_task(
     if previous_worker_code and previous_worker_code != record.assigned_worker_code:
         previous_worker = db.scalar(select(WorkerNode).where(WorkerNode.worker_code == previous_worker_code))
         if previous_worker:
-            previous_worker.current_task_title = ""
-            if get_effective_worker_status(previous_worker) != "offline":
-                previous_worker.status = "idle"
-            previous_worker.heartbeat_note = f"已取消任务 #{record.id} 指派"
+            sync_worker_dispatch_state(db, previous_worker, f"已取消任务 #{record.id} 指派")
 
     assigned_worker = None
     if record.assigned_worker_code:
@@ -2285,14 +2562,9 @@ def update_task(
 
     if assigned_worker:
         if record.status == "running":
-            assigned_worker.status = "running"
-            assigned_worker.current_task_title = record.title
-            assigned_worker.heartbeat_note = f"处理中：任务 #{record.id}"
+            sync_worker_dispatch_state(db, assigned_worker, f"处理中：任务 #{record.id}", record.title)
         elif record.status in ["success", "failed", "cancelled", "pending", "queued"]:
-            assigned_worker.current_task_title = ""
-            if get_effective_worker_status(assigned_worker) != "offline":
-                assigned_worker.status = "idle"
-            assigned_worker.heartbeat_note = f"最近处理任务 #{record.id} 状态：{record.status}"
+            sync_worker_dispatch_state(db, assigned_worker, f"最近处理任务 #{record.id} 状态：{record.status}")
 
     create_task_execution_record(
         db,
@@ -2338,42 +2610,33 @@ def claim_task(
     worker = get_worker_or_404(db, payload.worker_code)
     if worker.group_id != token_record.group_id:
         raise HTTPException(status_code=409, detail="当前 Worker 节点归组与 Worker Token 不一致")
+    recover_stale_task_leases(db, group_id=token_record.group_id)
+
     current_running_task = db.scalar(
         select(TaskRecord)
-        .where(
-            TaskRecord.assigned_worker_code == payload.worker_code,
-            TaskRecord.status == "running",
-        )
+        .where(TaskRecord.assigned_worker_code == payload.worker_code, TaskRecord.status == "running")
         .order_by(desc(TaskRecord.id))
         .limit(1)
     )
-    if current_running_task:
+    available_slots = get_worker_available_slots(db, worker)
+    if current_running_task and available_slots <= 0:
         return {"ok": True, "item": serialize_task_record(current_running_task), "reused": True}
 
-    statement = (
-        select(TaskRecord)
-        .where(TaskRecord.status.in_(["pending", "queued"]))
-        .order_by(
-            case((TaskRecord.priority == "high", 0), else_=1),
-            TaskRecord.id,
-        )
-        .limit(1)
-    )
-    if token_record.group_id is not None:
-        statement = statement.where(TaskRecord.group_id == token_record.group_id)
-    task = db.scalar(statement)
+    task = select_claimable_task_for_worker(db, worker, token_record.group_id)
     if not task:
-        if get_effective_worker_status(worker) != "offline":
-            worker.status = "idle"
-            worker.current_task_title = ""
-            worker.heartbeat_note = "暂无可领取任务"
-            db.commit()
+        sync_worker_dispatch_state(db, worker, "暂无可领取任务")
+        db.commit()
         return {"ok": True, "item": None}
 
     state = get_task_runtime_state(task)
     state["attempt_count"] = int(state.get("attempt_count", 0)) + 1
     state["last_error"] = ""
-    append_task_history(state, "claimed", worker_code=payload.worker_code)
+    append_task_history(
+        state,
+        "claimed",
+        worker_code=payload.worker_code,
+        required_capabilities=get_task_required_capabilities(task),
+    )
     save_task_runtime_state(task, state)
 
     previous_status = task.status
@@ -2381,7 +2644,7 @@ def claim_task(
     task.assigned_worker_code = payload.worker_code
     worker.status = "running"
     worker.current_task_title = task.title
-    worker.heartbeat_note = f"已领取任务 #{task.id}"
+    worker.heartbeat_note = f"已领取任务 #{task.id}，剩余槽位 {max(0, available_slots - 1)}"
     worker.last_heartbeat_at = utcnow()
     create_task_execution_record(
         db,
@@ -2394,7 +2657,12 @@ def claim_task(
         worker_token_id=token_record.id,
         attempt_count=int(state.get("attempt_count", 0)),
         retry_count=int(state.get("retry_count", 0)),
-        detail={"reused": False, "priority": task.priority},
+        detail={
+            "reused": False,
+            "priority": task.priority,
+            "required_capabilities": get_task_required_capabilities(task),
+            "preferred_worker_codes": get_task_preferred_worker_codes(task),
+        },
     )
     db.commit()
     db.refresh(task)
@@ -2433,7 +2701,7 @@ def complete_task(
     previous_status = task.status
     task.status = "success"
     ensure_asset_record_from_result(db, task, payload.result)
-    set_worker_idle_if_online(worker, f"最近完成任务 #{task.id}")
+    sync_worker_dispatch_state(db, worker, f"最近完成任务 #{task.id}")
     worker.last_heartbeat_at = utcnow()
     create_task_execution_record(
         db,
@@ -2503,7 +2771,8 @@ def fail_task(
     )
     save_task_runtime_state(task, state)
 
-    set_worker_idle_if_online(
+    sync_worker_dispatch_state(
+        db,
         worker,
         f"任务 #{task.id} {'已进入重试队列' if will_retry else '执行失败'}",
     )

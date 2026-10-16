@@ -33,6 +33,9 @@ export default function WorkersPageClient() {
     total: 0,
     online: 0,
     offline: 0,
+    total_slots: 0,
+    busy_slots: 0,
+    available_slots: 0,
     latest: null,
   });
   const [busy, setBusy] = useState("");
@@ -43,7 +46,9 @@ export default function WorkersPageClient() {
     status: "idle",
     group_id: "",
     machine_info: "Windows 11 / RTX 4060 / Clash",
-    capabilities: "yt-dlp,ffmpeg,moviepy,upload-r2",
+    capabilities: "yt-dlp,ffmpeg,moviepy,upload-r2,llm-agent",
+    max_parallel_tasks: "1",
+    scheduler_weight: "100",
     current_task_title: "",
     heartbeat_note: "已连接 API，等待拉取任务",
   });
@@ -103,6 +108,8 @@ export default function WorkersPageClient() {
           body: JSON.stringify({
             ...workerForm,
             group_id: workerForm.group_id ? Number(workerForm.group_id) : null,
+            max_parallel_tasks: Number(workerForm.max_parallel_tasks || 1),
+            scheduler_weight: Number(workerForm.scheduler_weight || 100),
             capabilities: workerForm.capabilities
               .split(",")
               .map((item) => item.trim())
@@ -157,16 +164,16 @@ export default function WorkersPageClient() {
       ok: (workerSummary.online || 0) > 0,
     },
     {
-      label: "离线节点",
-      value: String(workerSummary.offline || 0),
-      hint: "重点关注心跳超时",
-      ok: (workerSummary.offline || 0) === 0,
+      label: "总槽位",
+      value: String(workerSummary.total_slots || 0),
+      hint: "调度总并发容量",
+      ok: (workerSummary.total_slots || 0) > 0,
     },
     {
-      label: "最新节点",
-      value: workerSummary.latest?.display_name || "暂无",
-      hint: workerSummary.latest?.is_timed_out ? "最新节点已超时" : "最近一次心跳",
-      ok: !workerSummary.latest?.is_timed_out,
+      label: "可用槽位",
+      value: String(workerSummary.available_slots || 0),
+      hint: `已占用 ${workerSummary.busy_slots || 0}`,
+      ok: (workerSummary.available_slots || 0) > 0,
     },
   ];
 
@@ -253,12 +260,26 @@ export default function WorkersPageClient() {
               onChange={(event) => setWorkerForm((prev) => ({ ...prev, machine_info: event.target.value }))}
               placeholder="机器信息"
             />
-            <input
-              style={inputStyle}
-              value={workerForm.capabilities}
-              onChange={(event) => setWorkerForm((prev) => ({ ...prev, capabilities: event.target.value }))}
-              placeholder="能力，逗号分隔"
-            />
+            <div style={{ display: "grid", gridTemplateColumns: "1.2fr .6fr .6fr", gap: 12 }}>
+              <input
+                style={inputStyle}
+                value={workerForm.capabilities}
+                onChange={(event) => setWorkerForm((prev) => ({ ...prev, capabilities: event.target.value }))}
+                placeholder="能力，逗号分隔"
+              />
+              <input
+                style={inputStyle}
+                value={workerForm.max_parallel_tasks}
+                onChange={(event) => setWorkerForm((prev) => ({ ...prev, max_parallel_tasks: event.target.value }))}
+                placeholder="并发槽位"
+              />
+              <input
+                style={inputStyle}
+                value={workerForm.scheduler_weight}
+                onChange={(event) => setWorkerForm((prev) => ({ ...prev, scheduler_weight: event.target.value }))}
+                placeholder="调度权重"
+              />
+            </div>
             <textarea
               style={{ ...inputStyle, minHeight: 100, resize: "vertical" }}
               value={workerForm.heartbeat_note}
@@ -316,6 +337,9 @@ export default function WorkersPageClient() {
                         <div>{item.display_name}</div>
                         <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
                           {item.worker_code} / 组 {item.group_id || "-"}
+                        </div>
+                        <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
+                          能力 {item.capabilities?.join(", ") || "-"} / 槽位 {item.available_slots ?? 0}/{item.max_parallel_tasks || 1}
                         </div>
                       </td>
                       <td style={tableCellStyle}>
