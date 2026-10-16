@@ -33,6 +33,8 @@ const outputPathStyle = {
   color: "#cbd5e1",
   fontSize: 12,
   lineHeight: 1.45,
+  minHeight: 40,
+  boxSizing: "border-box",
 };
 
 const compactInfoLabelStyle = {
@@ -50,8 +52,36 @@ const compactInfoValueStyle = {
 
 const compactInfoButtonStyle = {
   ...secondaryButtonStyle,
-  padding: "6px 10px",
+  padding: "0 10px",
   fontSize: 12,
+  height: 28,
+  minWidth: 84,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  whiteSpace: "nowrap",
+};
+
+const taskActionButtonStyle = {
+  ...buttonStyle,
+  height: 38,
+  minWidth: 56,
+  padding: "0 16px",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  whiteSpace: "nowrap",
+};
+
+const taskSecondaryActionButtonStyle = {
+  ...secondaryButtonStyle,
+  height: 38,
+  minWidth: 84,
+  padding: "0 16px",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  whiteSpace: "nowrap",
 };
 
 function CopyableInfoRow({ label, value, copyValue, onClick, title }) {
@@ -208,31 +238,40 @@ function PresignedLinkRow({ label, href, onGenerate, generating, copyValue, onCo
     <div
       style={{
         ...outputPathStyle,
-        display: "flex",
+        display: "grid",
+        gridTemplateColumns: "72px minmax(0, 1fr) auto",
         alignItems: "center",
         gap: 8,
-        paddingTop: 5,
-        paddingBottom: 5,
       }}
     >
       <span style={compactInfoLabelStyle}>{label}</span>
-      <span style={{ ...compactInfoValueStyle, color: href ? "#cbd5e1" : "#64748b" }}>
-        {href || copyValue || "点击生成下载链接"}
+      <span
+        style={{
+          ...compactInfoValueStyle,
+          color: href ? "#cbd5e1" : "#64748b",
+        }}
+        title={href || copyValue || "点击生成下载链接"}
+      >
+        {href ? "已生成预签名下载链接" : copyValue || "点击生成下载链接"}
       </span>
       {href ? (
-        <>
+        <div style={{ display: "flex", gap: 6 }}>
           <a
             href={href}
             target="_blank"
             rel="noreferrer"
-            style={{ color: "#818cf8", textDecoration: "none", whiteSpace: "nowrap" }}
+            style={{
+              ...compactInfoButtonStyle,
+              color: "#818cf8",
+              textDecoration: "none",
+            }}
           >
             打开
           </a>
           <button type="button" style={compactInfoButtonStyle} onClick={onCopy}>
             复制
           </button>
-        </>
+        </div>
       ) : (
         <button type="button" style={compactInfoButtonStyle} onClick={onGenerate}>
           {generating ? "生成中..." : "生成链接"}
@@ -270,7 +309,7 @@ export default function TasksPageClient() {
   });
   const [taskDrafts, setTaskDrafts] = useState({});
   const [taskFilter, setTaskFilter] = useState("");
-  const [pageSize, setPageSize] = useState("10");
+  const [pageSize, setPageSize] = useState("20");
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("已就绪");
   const [presignedUrls, setPresignedUrls] = useState({});
@@ -320,7 +359,7 @@ export default function TasksPageClient() {
   }
 
   useEffect(() => {
-    reloadAll("", pageSize);
+    reloadAll("", "20");
   }, []);
 
   async function copyText(value, successText) {
@@ -560,7 +599,7 @@ export default function TasksPageClient() {
                 reloadAll(taskFilter, nextValue);
               }}
             >
-              {["10", "20", "50", "100"].map((value) => (
+              {["20", "50", "100"].map((value) => (
                 <option key={value} value={value}>
                   每页 {value}
                 </option>
@@ -695,7 +734,15 @@ export default function TasksPageClient() {
           </form>
         </Section>
 
-        <Section title="任务队列" hint="这里保留运营最常用的列：状态、分配、尝试次数、重试。">
+        <Section
+          title="任务队列"
+          hint="这里保留运营最常用的列：状态、分配、尝试次数、重试。"
+          action={
+            <div style={{ fontSize: 12, color: "#94a3b8" }}>
+              共 {taskSummary.total || 0} 条，当前每页 {pageSize} 条
+            </div>
+          }
+        >
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
               <thead>
@@ -808,7 +855,7 @@ export default function TasksPageClient() {
                           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                             <button
                               type="button"
-                              style={buttonStyle}
+                              style={taskActionButtonStyle}
                               onClick={() => saveTaskUpdate(item)}
                               disabled={busy === `task-${item.id}`}
                             >
@@ -817,7 +864,7 @@ export default function TasksPageClient() {
                             {["failed", "cancelled", "success"].includes(item.status) ? (
                               <button
                                 type="button"
-                                style={secondaryButtonStyle}
+                                style={taskSecondaryActionButtonStyle}
                                 onClick={() => retryTask(item.id)}
                                 disabled={busy === `retry-${item.id}`}
                               >
