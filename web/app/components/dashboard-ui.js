@@ -38,12 +38,14 @@ export const secondaryButtonStyle = {
 };
 
 export const taskStatusOptions = ["pending", "queued", "running", "success", "failed", "cancelled"];
+export const authStorageKey = "creator-cockpit-access-token";
 
 const navItems = [
   { href: "/", label: "首页总览", hint: "只看状态和入口" },
   { href: "/tasks", label: "任务中心", hint: "创建、分配、重试" },
   { href: "/workers", label: "Worker 节点", hint: "节点在线、心跳、状态" },
   { href: "/files", label: "文件中心", hint: "R2 文件和数据库记录" },
+  { href: "/access", label: "访问控制", hint: "用户、账号组、凭证、审计" },
 ];
 
 export function formatDate(value) {
@@ -59,6 +61,27 @@ export async function readJson(response) {
     throw new Error(data.detail || "请求失败");
   }
   return data;
+}
+
+export function getStoredAccessToken() {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  return window.localStorage.getItem(authStorageKey) || "";
+}
+
+export function buildAuthHeaders(headers = {}) {
+  const accessToken = getStoredAccessToken();
+  return accessToken
+    ? { ...headers, Authorization: `Bearer ${accessToken}` }
+    : headers;
+}
+
+export function authFetch(input, init = {}) {
+  return fetch(input, {
+    ...init,
+    headers: buildAuthHeaders(init.headers || {}),
+  });
 }
 
 export function StatusPill({ ok, text }) {

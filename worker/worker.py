@@ -353,6 +353,7 @@ class WorkerClient:
             for item in env("WORKER_CAPABILITIES", "yt-dlp,ffmpeg,ffprobe,upload-r2").split(",")
             if item.strip()
         ]
+        self.worker_token = env("WORKER_TOKEN")
         self.idle_status = env("WORKER_IDLE_STATUS", "idle")
         self.poll_interval_seconds = env_int("WORKER_POLL_INTERVAL_SECONDS", 10, 3)
         self.heartbeat_interval_seconds = env_int("WORKER_HEARTBEAT_INTERVAL_SECONDS", 15, 5)
@@ -361,10 +362,38 @@ class WorkerClient:
         self.root_dir = Path(env("WORKER_ROOT_DIR", "./runtime")).resolve()
         self.session = requests.Session()
 
-    def _post(self, path: str, payload: dict):
-        response = self.session.post(f"{self.api_base_url}{path}", json=payload, timeout=60)
+    def build_headers(self, *, include_json: bool = True, require_token: bool = False) -> dict:
+        headers = {}
+        if include_json:
+            headers["Content-Type"] = "application/json"
+        if self.worker_token:
+            headers["Authorization"] = f"Bearer {self.worker_token}"
+        elif require_token:
+            raise RuntimeError("缺少 WORKER_TOKEN，无法完成 Worker 注册或任务执行鉴权")
+        return headers
+
+    def _post(self, path: str, payload: dict, *, require_token: bool = False):
+        response = self.session.post(
+            f"{self.api_base_url}{path}",
+            json=payload,
+            headers=self.build_headers(require_token=require_token),
+            timeout=60,
+        )
         response.raise_for_status()
         return response.json()
+
+    def register(self):
+        return self._post(
+            "/worker/register",
+            {
+                "worker_code": self.worker_code,
+                "display_name": self.display_name,
+                "machine_info": self.machine_info,
+                "capabilities": self.capabilities,
+                "heartbeat_note": "Worker 启动完成，已通过 Token 注册",
+            },
+            require_token=True,
+        )
 
     def heartbeat(self, *, status: str, current_task_title: str = "", heartbeat_note: str = ""):
         payload = {
@@ -379,12 +408,13 @@ class WorkerClient:
         return self._post("/workers/heartbeat", payload)
 
     def claim_task(self):
-        return self._post("/worker/tasks/claim", {"worker_code": self.worker_code})
+        return self._post("/worker/tasks/claim", {"worker_code": self.worker_code}, require_token=True)
 
     def complete_task(self, task_id: int, result: dict):
         return self._post(
             f"/worker/tasks/{task_id}/complete",
             {"worker_code": self.worker_code, "result": result},
+            require_token=True,
         )
 
     def fail_task(self, task_id: int, error_message: str, *, retryable: bool, result: dict):
@@ -396,6 +426,7 @@ class WorkerClient:
                 "retryable": retryable,
                 "result": result,
             },
+            require_token=True,
         )
 
 
@@ -887,6 +918,13 @@ def main():
         sys.exit(1)
 
     print(f"[{now_iso()}] Worker 启动：{client.display_name} ({client.worker_code})")
+    try:
+        register_response = client.register()
+        print(f"[{now_iso()}] Worker 注册成功：{json.dumps(register_response, ensure_ascii=False)}")
+    except Exception as error:
+        print(f"[{now_iso()}] Worker 注册失败：{error}")
+        sys.exit(1)
+
     while True:
         try:
             client.heartbeat(

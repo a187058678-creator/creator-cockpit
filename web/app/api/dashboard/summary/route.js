@@ -1,26 +1,19 @@
-import { NextResponse } from "next/server";
+import { getApiBaseUrl, handleProxyError, proxyJson } from "../../_lib/api";
 
 export const dynamic = "force-dynamic";
 
-function getApiBaseUrl() {
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
-  if (!apiBaseUrl) {
-    throw new Error("缺少 NEXT_PUBLIC_API_BASE_URL");
-  }
-  return apiBaseUrl.replace(/\/+$/, "");
-}
-
-export async function GET() {
+export async function GET(request) {
   try {
-    const response = await fetch(`${getApiBaseUrl()}/dashboard/summary`, {
+    const { searchParams } = new URL(request.url);
+    const groupId = searchParams.get("group_id") || "";
+    const query = new URLSearchParams();
+    if (groupId) {
+      query.set("group_id", groupId);
+    }
+    return await proxyJson(`${getApiBaseUrl()}/dashboard/summary${query.toString() ? `?${query.toString()}` : ""}`, {
       cache: "no-store",
-    });
-    const data = await response.json();
-    return NextResponse.json(data, { status: response.status });
+    }, request);
   } catch (error) {
-    return NextResponse.json(
-      { detail: error.message || "获取仪表盘摘要失败" },
-      { status: 500 }
-    );
+    return handleProxyError(error, "获取仪表盘摘要失败");
   }
 }

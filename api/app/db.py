@@ -1,6 +1,6 @@
 import os
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 
@@ -47,3 +47,22 @@ def init_db():
     from app import models
 
     Base.metadata.create_all(bind=engine)
+    ensure_runtime_columns()
+
+
+def ensure_runtime_columns():
+    columns_to_ensure = {
+        "asset_records": {
+            "group_id": 'ALTER TABLE asset_records ADD COLUMN group_id INTEGER',
+        },
+        "worker_nodes": {
+            "group_id": 'ALTER TABLE worker_nodes ADD COLUMN group_id INTEGER',
+        },
+    }
+    inspector = inspect(engine)
+    with engine.begin() as connection:
+        for table_name, column_map in columns_to_ensure.items():
+            existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+            for column_name, ddl in column_map.items():
+                if column_name not in existing_columns:
+                    connection.execute(text(ddl))

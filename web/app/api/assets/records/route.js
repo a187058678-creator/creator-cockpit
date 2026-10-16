@@ -1,32 +1,25 @@
-import { NextResponse } from "next/server";
+import { getApiBaseUrl, handleProxyError, proxyJson } from "../../_lib/api";
 
 export const dynamic = "force-dynamic";
-
-function getApiBaseUrl() {
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
-  if (!apiBaseUrl) {
-    throw new Error("缺少 NEXT_PUBLIC_API_BASE_URL");
-  }
-  return apiBaseUrl.replace(/\/+$/, "");
-}
 
 export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);
     const prefix = searchParams.get("prefix") || "assets";
+    const groupId = searchParams.get("group_id") || "";
     const limit = searchParams.get("limit") || "20";
-    const response = await fetch(
-      `${getApiBaseUrl()}/assets/records?prefix=${encodeURIComponent(prefix)}&limit=${encodeURIComponent(limit)}`,
-      {
-        cache: "no-store",
-      }
+    const query = new URLSearchParams();
+    query.set("prefix", prefix);
+    query.set("limit", limit);
+    if (groupId) {
+      query.set("group_id", groupId);
+    }
+    return await proxyJson(
+      `${getApiBaseUrl()}/assets/records?${query.toString()}`,
+      { cache: "no-store" },
+      request
     );
-    const data = await response.json();
-    return NextResponse.json(data, { status: response.status });
   } catch (error) {
-    return NextResponse.json(
-      { detail: error.message || "获取资产记录失败" },
-      { status: 500 }
-    );
+    return handleProxyError(error, "获取资产记录失败");
   }
 }

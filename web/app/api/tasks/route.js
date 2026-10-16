@@ -1,48 +1,38 @@
-import { NextResponse } from "next/server";
+import { getApiBaseUrl, handleProxyError, proxyJson } from "../_lib/api";
 
 export const dynamic = "force-dynamic";
-
-function getApiBaseUrl() {
-  const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL;
-  if (!apiBaseUrl) {
-    throw new Error("缺少 NEXT_PUBLIC_API_BASE_URL");
-  }
-  return apiBaseUrl.replace(/\/+$/, "");
-}
 
 export async function GET(request) {
   try {
     const { searchParams } = new URL(request.url);
     const status = searchParams.get("status") || "";
+    const groupId = searchParams.get("group_id") || "";
     const limit = searchParams.get("limit") || "20";
-    const response = await fetch(
-      `${getApiBaseUrl()}/tasks?status=${encodeURIComponent(status)}&limit=${encodeURIComponent(limit)}`,
-      { cache: "no-store" }
+    const query = new URLSearchParams();
+    query.set("status", status);
+    query.set("limit", limit);
+    if (groupId) {
+      query.set("group_id", groupId);
+    }
+    return await proxyJson(
+      `${getApiBaseUrl()}/tasks?${query.toString()}`,
+      { cache: "no-store" },
+      request
     );
-    const data = await response.json();
-    return NextResponse.json(data, { status: response.status });
   } catch (error) {
-    return NextResponse.json(
-      { detail: error.message || "获取任务列表失败" },
-      { status: 500 }
-    );
+    return handleProxyError(error, "获取任务列表失败");
   }
 }
 
 export async function POST(request) {
   try {
     const payload = await request.json();
-    const response = await fetch(`${getApiBaseUrl()}/tasks`, {
+    return await proxyJson(`${getApiBaseUrl()}/tasks`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-    });
-    const data = await response.json();
-    return NextResponse.json(data, { status: response.status });
+    }, request);
   } catch (error) {
-    return NextResponse.json(
-      { detail: error.message || "创建任务失败" },
-      { status: 500 }
-    );
+    return handleProxyError(error, "创建任务失败");
   }
 }

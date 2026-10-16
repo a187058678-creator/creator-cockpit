@@ -5,6 +5,7 @@ import {
   DashboardShell,
   Section,
   SummaryCard,
+  authFetch,
   buttonStyle,
   formatDate,
   inputStyle,
@@ -24,6 +25,8 @@ const tableCellStyle = {
 };
 
 export default function FilesPageClient() {
+  const [groups, setGroups] = useState([]);
+  const [assetGroupFilter, setAssetGroupFilter] = useState("");
   const [summary, setSummary] = useState({
     total_asset_records: 0,
     bucket: "",
@@ -44,17 +47,30 @@ export default function FilesPageClient() {
 
   async function loadSummary() {
     try {
-      const data = await readJson(await fetch("/api/dashboard/summary", { cache: "no-store" }));
+      const data = await readJson(await authFetch("/api/dashboard/summary", { cache: "no-store" }));
       setSummary(data);
     } catch (error) {
       setMessage(error.message || "获取文件摘要失败");
     }
   }
 
-  async function loadAssets(prefix = listPrefix) {
+  async function loadGroups() {
+    try {
+      const data = await readJson(await authFetch("/api/groups", { cache: "no-store" }));
+      setGroups(data.items || []);
+    } catch (error) {
+      setGroups([]);
+      setMessage(error.message || "获取账号组失败");
+    }
+  }
+
+  async function loadAssets(prefix = listPrefix, groupId = assetGroupFilter) {
     try {
       const data = await readJson(
-        await fetch(`/api/assets/list?prefix=${encodeURIComponent(prefix)}`, { cache: "no-store" })
+        await authFetch(
+          `/api/assets/list?prefix=${encodeURIComponent(prefix)}&group_id=${encodeURIComponent(groupId)}`,
+          { cache: "no-store" }
+        )
       );
       setAssets(data.items || []);
     } catch (error) {
@@ -63,10 +79,10 @@ export default function FilesPageClient() {
     }
   }
 
-  async function loadRecords(prefix = listPrefix) {
+  async function loadRecords(prefix = listPrefix, groupId = assetGroupFilter) {
     try {
       const data = await readJson(
-        await fetch(`/api/assets/records?prefix=${encodeURIComponent(prefix)}`, {
+        await authFetch(`/api/assets/records?prefix=${encodeURIComponent(prefix)}&group_id=${encodeURIComponent(groupId)}`, {
           cache: "no-store",
         })
       );
@@ -77,9 +93,9 @@ export default function FilesPageClient() {
     }
   }
 
-  async function reloadAll(prefix = listPrefix) {
+  async function reloadAll(prefix = listPrefix, groupId = assetGroupFilter) {
     setMessage("正在刷新文件中心...");
-    await Promise.all([loadSummary(), loadAssets(prefix), loadRecords(prefix)]);
+    await Promise.all([loadSummary(), loadAssets(prefix, groupId), loadRecords(prefix, groupId), loadGroups()]);
     setMessage("文件中心已刷新");
   }
 
@@ -93,19 +109,20 @@ export default function FilesPageClient() {
     setMessage("正在上传文本...");
     try {
       const data = await readJson(
-        await fetch("/api/assets/text", {
+        await authFetch("/api/assets/text", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             text: textBody,
             prefix: textPrefix,
             filename: textFilename || undefined,
+            group_id: assetGroupFilter ? Number(assetGroupFilter) : null,
           }),
         })
       );
       setMessage(`文本上传成功：${data.key}`);
       setListPrefix(textPrefix);
-      await reloadAll(textPrefix);
+      await reloadAll(textPrefix, assetGroupFilter);
     } catch (error) {
       setMessage(error.message || "文本上传失败");
     } finally {
@@ -126,15 +143,18 @@ export default function FilesPageClient() {
       const formData = new FormData();
       formData.append("file", selectedFile);
       const data = await readJson(
-        await fetch(`/api/assets/file?prefix=${encodeURIComponent(filePrefix)}`, {
+        await authFetch(
+          `/api/assets/file?prefix=${encodeURIComponent(filePrefix)}&group_id=${encodeURIComponent(assetGroupFilter)}`,
+          {
           method: "POST",
           body: formData,
-        })
+          }
+        )
       );
       setMessage(`文件上传成功：${data.key}`);
       setSelectedFile(null);
       setListPrefix(filePrefix);
-      await reloadAll(filePrefix);
+      await reloadAll(filePrefix, assetGroupFilter);
     } catch (error) {
       setMessage(error.message || "文件上传失败");
     } finally {
@@ -145,7 +165,7 @@ export default function FilesPageClient() {
   async function createPreviewLink(key) {
     setBusy(`preview-${key}`);
     try {
-      const data = await readJson(await fetch(`/api/assets/presign?key=${encodeURIComponent(key)}`));
+      const data = await readJson(await authFetch(`/api/assets/presign?key=${encodeURIComponent(key)}`));
       window.open(data.url, "_blank", "noopener,noreferrer");
       setMessage(`已生成预览链接：${key}`);
     } catch (error) {
@@ -188,6 +208,22 @@ export default function FilesPageClient() {
       description="这里专门处理 R2 文件上传、对象列表和数据库资产记录查询。"
       action={
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <select
+            style={{ ...inputStyle, width: 180 }}
+            value={assetGroupFilter}
+            onChange={(event) => {
+              const nextValue = event.target.value;
+              setAssetGroupFilter(nextValue);
+              reloadAll(listPrefix, nextValue);
+            }}
+          >
+            <option value="">全部账号组</option>
+            {groups.map((group) => (
+              <option key={group.id} value={group.id}>
+                {group.group_name}
+              </option>
+            ))}
+          </select>
           <input
             style={{ ...inputStyle, width: 180 }}
             value={listPrefix}
@@ -233,6 +269,18 @@ export default function FilesPageClient() {
               onChange={(event) => setTextPrefix(event.target.value)}
               placeholder="prefix，例如 assets"
             />
+          <select
+            style={inputStyle}
+            value={assetGroupFilter}
+            onChange={(event) => setAssetGroupFilter(event.target.value)}
+          >
+            <option value="">归属账号组</option>
+            {groups.map((group) => (
+              <option key={group.id} value={group.id}>
+                {group.group_name}
+              </option>
+            ))}
+          </select>
             <input
               style={inputStyle}
               value={textFilename}
@@ -258,6 +306,18 @@ export default function FilesPageClient() {
               onChange={(event) => setFilePrefix(event.target.value)}
               placeholder="prefix，例如 assets"
             />
+            <select
+              style={inputStyle}
+              value={assetGroupFilter}
+              onChange={(event) => setAssetGroupFilter(event.target.value)}
+            >
+              <option value="">归属账号组</option>
+              {groups.map((group) => (
+                <option key={group.id} value={group.id}>
+                  {group.group_name}
+                </option>
+              ))}
+            </select>
             <input
               type="file"
               style={inputStyle}
@@ -339,7 +399,10 @@ export default function FilesPageClient() {
                   <tr key={item.id}>
                     <td style={tableCellStyle}>{item.id}</td>
                     <td style={tableCellStyle}>{item.source_type}</td>
-                    <td style={{ ...tableCellStyle, wordBreak: "break-all" }}>{item.key}</td>
+                    <td style={{ ...tableCellStyle, wordBreak: "break-all" }}>
+                      <div>{item.key}</div>
+                      <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>组 {item.group_id || "-"}</div>
+                    </td>
                     <td style={tableCellStyle}>{item.size_bytes}</td>
                     <td style={tableCellStyle}>{item.status}</td>
                   </tr>

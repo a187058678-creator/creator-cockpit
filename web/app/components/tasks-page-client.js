@@ -5,6 +5,7 @@ import {
   DashboardShell,
   Section,
   SummaryCard,
+  authFetch,
   buttonStyle,
   cardStyle,
   inputStyle,
@@ -173,6 +174,7 @@ function buildTaskFormPreset({ title, sourceValue, profile = "balanced" }) {
     source_type: "youtube",
     source_value: sourceValue,
     priority: "high",
+    group_id: "",
     payload: JSON.stringify(buildTaskPayload(profile), null, 2),
   };
 }
@@ -300,6 +302,7 @@ function getSelectedWorkerCode(task, taskDrafts, workers) {
 export default function TasksPageClient() {
   const [tasks, setTasks] = useState([]);
   const [workers, setWorkers] = useState([]);
+  const [groups, setGroups] = useState([]);
   const [taskSummary, setTaskSummary] = useState({
     total: 0,
     pending: 0,
@@ -309,6 +312,7 @@ export default function TasksPageClient() {
   });
   const [taskDrafts, setTaskDrafts] = useState({});
   const [taskFilter, setTaskFilter] = useState("");
+  const [taskGroupFilter, setTaskGroupFilter] = useState("");
   const [pageSize, setPageSize] = useState("20");
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("已就绪");
@@ -318,20 +322,22 @@ export default function TasksPageClient() {
     "https://www.youtube.com/shorts/QfZnSS1hgy0"
   );
 
-  async function loadTaskSummary() {
+  async function loadTaskSummary(groupId = taskGroupFilter) {
     try {
-      const data = await readJson(await fetch("/api/tasks/summary", { cache: "no-store" }));
+      const data = await readJson(
+        await authFetch(`/api/tasks/summary?group_id=${encodeURIComponent(groupId)}`, { cache: "no-store" })
+      );
       setTaskSummary(data);
     } catch (error) {
       setMessage(error.message || "获取任务摘要失败");
     }
   }
 
-  async function loadTasks(status = taskFilter, limit = pageSize) {
+  async function loadTasks(status = taskFilter, limit = pageSize, groupId = taskGroupFilter) {
     try {
       const data = await readJson(
-        await fetch(
-          `/api/tasks?status=${encodeURIComponent(status)}&limit=${encodeURIComponent(limit)}`,
+        await authFetch(
+          `/api/tasks?status=${encodeURIComponent(status)}&group_id=${encodeURIComponent(groupId)}&limit=${encodeURIComponent(limit)}`,
           { cache: "no-store" }
         )
       );
@@ -344,7 +350,7 @@ export default function TasksPageClient() {
 
   async function loadWorkers() {
     try {
-      const data = await readJson(await fetch("/api/workers", { cache: "no-store" }));
+      const data = await readJson(await authFetch("/api/workers", { cache: "no-store" }));
       setWorkers(data.items || []);
     } catch (error) {
       setWorkers([]);
@@ -352,9 +358,19 @@ export default function TasksPageClient() {
     }
   }
 
-  async function reloadAll(status = taskFilter, limit = pageSize) {
+  async function loadGroups() {
+    try {
+      const data = await readJson(await authFetch("/api/groups", { cache: "no-store" }));
+      setGroups(data.items || []);
+    } catch (error) {
+      setGroups([]);
+      setMessage(error.message || "获取账号组列表失败");
+    }
+  }
+
+  async function reloadAll(status = taskFilter, limit = pageSize, groupId = taskGroupFilter) {
     setMessage("正在刷新任务中心...");
-    await Promise.all([loadTaskSummary(), loadTasks(status, limit), loadWorkers()]);
+    await Promise.all([loadTaskSummary(groupId), loadTasks(status, limit, groupId), loadWorkers(), loadGroups()]);
     setMessage("任务中心已刷新");
   }
 
@@ -394,6 +410,7 @@ export default function TasksPageClient() {
       ...taskForm,
       title: `${taskForm.title}${suffix}`,
       source_value: sourceValue,
+      group_id: taskForm.group_id ? Number(taskForm.group_id) : null,
       payload: parseTaskPayload(),
     };
   }
@@ -410,14 +427,14 @@ export default function TasksPageClient() {
     setMessage("正在创建任务...");
     try {
       const data = await readJson(
-        await fetch("/api/tasks", {
+        await authFetch("/api/tasks", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(buildTaskRequest(taskForm.source_value)),
         })
       );
       setMessage(`任务已创建：#${data.item.id} ${data.item.title}`);
-      await reloadAll(taskFilter, pageSize);
+      await reloadAll(taskFilter, pageSize, taskGroupFilter);
     } catch (error) {
       setMessage(error.message || "创建任务失败");
     } finally {
@@ -441,7 +458,7 @@ export default function TasksPageClient() {
     try {
       const created = [];
       for (let index = 0; index < sources.length; index += 1) {
-        const response = await fetch("/api/tasks", {
+        const response = await authFetch("/api/tasks", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(buildTaskRequest(sources[index], index)),
@@ -450,7 +467,7 @@ export default function TasksPageClient() {
         created.push(`#${data.item.id}`);
       }
       setMessage(`批量任务已创建：${created.join("、")}`);
-      await reloadAll(taskFilter, pageSize);
+      await reloadAll(taskFilter, pageSize, taskGroupFilter);
     } catch (error) {
       setMessage(error.message || "批量创建任务失败");
     } finally {
@@ -467,7 +484,7 @@ export default function TasksPageClient() {
     setMessage(`正在保存任务 #${task.id}...`);
     try {
       const data = await readJson(
-        await fetch(`/api/tasks/${task.id}`, {
+        await authFetch(`/api/tasks/${task.id}`, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -482,7 +499,7 @@ export default function TasksPageClient() {
         return next;
       });
       setMessage(`任务已更新：#${data.item.id} -> ${data.item.status}`);
-      await reloadAll(taskFilter, pageSize);
+      await reloadAll(taskFilter, pageSize, taskGroupFilter);
     } catch (error) {
       setMessage(error.message || "更新任务失败");
     } finally {
@@ -495,12 +512,12 @@ export default function TasksPageClient() {
     setMessage(`正在重试任务 #${taskId}...`);
     try {
       const data = await readJson(
-        await fetch(`/api/tasks/${taskId}/retry`, {
+        await authFetch(`/api/tasks/${taskId}/retry`, {
           method: "POST",
         })
       );
       setMessage(`任务已重试入队：#${data.item.id}`);
-      await reloadAll(taskFilter, pageSize);
+      await reloadAll(taskFilter, pageSize, taskGroupFilter);
     } catch (error) {
       setMessage(error.message || "任务重试失败");
     } finally {
@@ -591,12 +608,28 @@ export default function TasksPageClient() {
               placeholder="按状态过滤"
             />
             <select
+              style={{ ...inputStyle, width: 180 }}
+              value={taskGroupFilter}
+              onChange={(event) => {
+                const nextValue = event.target.value;
+                setTaskGroupFilter(nextValue);
+                reloadAll(taskFilter, pageSize, nextValue);
+              }}
+            >
+              <option value="">全部账号组</option>
+              {groups.map((group) => (
+                <option key={group.id} value={group.id}>
+                  {group.group_name}
+                </option>
+              ))}
+            </select>
+            <select
               style={{ ...inputStyle, width: 110 }}
               value={pageSize}
               onChange={(event) => {
                 const nextValue = event.target.value;
                 setPageSize(nextValue);
-                reloadAll(taskFilter, nextValue);
+                reloadAll(taskFilter, nextValue, taskGroupFilter);
               }}
             >
               {["20", "50", "100"].map((value) => (
@@ -605,7 +638,7 @@ export default function TasksPageClient() {
                 </option>
               ))}
             </select>
-            <button type="button" style={buttonStyle} onClick={() => reloadAll(taskFilter, pageSize)}>
+            <button type="button" style={buttonStyle} onClick={() => reloadAll(taskFilter, pageSize, taskGroupFilter)}>
               刷新任务
             </button>
           </div>
@@ -698,6 +731,18 @@ export default function TasksPageClient() {
                 placeholder="优先级"
               />
             </div>
+            <select
+              style={inputStyle}
+              value={taskForm.group_id}
+              onChange={(event) => setTaskForm((prev) => ({ ...prev, group_id: event.target.value }))}
+            >
+              <option value="">归属账号组（可留空）</option>
+              {groups.map((group) => (
+                <option key={group.id} value={group.id}>
+                  {group.group_name}
+                </option>
+              ))}
+            </select>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
               <input
                 style={inputStyle}
@@ -774,6 +819,9 @@ export default function TasksPageClient() {
                           <div>{item.title}</div>
                           <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
                             {item.source_type} / {item.source_value || "-"}
+                          </div>
+                          <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
+                            组 {item.group_id || "-"} / 创建人 {item.created_by_user_id || "-"} / 最近触发 {item.triggered_by_user_id || "-"}
                           </div>
                         </td>
                         <td style={tableCellStyle}>

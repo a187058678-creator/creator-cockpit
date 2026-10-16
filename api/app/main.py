@@ -1,6 +1,8 @@
 import os
 import json
 import uuid
+import hashlib
+import secrets
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
@@ -9,13 +11,24 @@ from typing import Any, Optional
 import boto3
 from botocore.client import Config
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import case, desc, func, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db, init_db
-from app.models import AssetRecord, TaskRecord, WorkerNode
+from app.models import (
+    AccountGroup,
+    AssetRecord,
+    AuditLog,
+    TaskRecord,
+    TaskExecutionRecord,
+    UserAccount,
+    UserGroupMember,
+    UserSession,
+    WorkerNode,
+    WorkerToken,
+)
 
 
 @asynccontextmanager
@@ -342,6 +355,7 @@ class UploadTextRequest(BaseModel):
     text: str
     prefix: str = "assets"
     filename: Optional[str] = None
+    group_id: Optional[int] = None
 
 
 class CreateTaskRequest(BaseModel):
@@ -350,6 +364,7 @@ class CreateTaskRequest(BaseModel):
     source_type: str = "manual"
     source_value: str = ""
     priority: str = "normal"
+    group_id: Optional[int] = None
     payload: dict = Field(default_factory=dict)
 
 
@@ -357,6 +372,7 @@ class WorkerHeartbeatRequest(BaseModel):
     worker_code: str
     display_name: str
     status: str = "idle"
+    group_id: Optional[int] = None
     machine_info: str = ""
     capabilities: list[str] = []
     current_task_title: str = ""
@@ -383,6 +399,70 @@ class WorkerTaskFailRequest(BaseModel):
     error_message: str
     retryable: bool = True
     result: dict = Field(default_factory=dict)
+
+
+class CreateUserRequest(BaseModel):
+    username: str
+    password: str = Field(min_length=6, max_length=128)
+    display_name: str
+    role: str = "admin"
+    status: str = "active"
+
+
+class UpdateUserRequest(BaseModel):
+    display_name: Optional[str] = None
+    role: Optional[str] = None
+    status: Optional[str] = None
+    password: Optional[str] = Field(default=None, min_length=6, max_length=128)
+
+
+class CreateGroupRequest(BaseModel):
+    group_name: str
+    group_code: str = ""
+    owner_user_id: Optional[int] = None
+    status: str = "active"
+    remark: str = ""
+
+
+class UpdateGroupRequest(BaseModel):
+    group_name: Optional[str] = None
+    owner_user_id: Optional[int] = None
+    status: Optional[str] = None
+    remark: Optional[str] = None
+
+
+class CreateGroupMemberRequest(BaseModel):
+    user_id: int
+    member_role: str = "editor"
+
+
+class UpdateGroupMemberRequest(BaseModel):
+    member_role: str
+
+
+class CreateWorkerTokenRequest(BaseModel):
+    worker_code: str
+    token_name: str = ""
+    group_id: Optional[int] = None
+    issued_by_user_id: Optional[int] = None
+    expire_days: int = Field(default=30, ge=1, le=3650)
+
+
+class RevokeWorkerTokenRequest(BaseModel):
+    reason: str = "manual_revoke"
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str = Field(min_length=6, max_length=128)
+
+
+class WorkerRegisterRequest(BaseModel):
+    worker_code: str
+    display_name: str
+    machine_info: str = ""
+    capabilities: list[str] = []
+    heartbeat_note: str = ""
 
 
 def get_required_env(name: str) -> str:
@@ -421,10 +501,124 @@ def build_object_url(key: str) -> str:
     return f"{endpoint}/{bucket}/{key}"
 
 
+def hash_secret(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120000).hex()
+    return f"{salt}${digest}"
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        salt, expected_digest = password_hash.split("$", 1)
+    except ValueError:
+        return False
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120000).hex()
+    return secrets.compare_digest(digest, expected_digest)
+
+
+def normalize_code(value: str, fallback_prefix: str) -> str:
+    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in str(value or "").strip())
+    cleaned = "-".join(part for part in cleaned.split("-") if part)
+    return cleaned or f"{fallback_prefix}-{uuid.uuid4().hex[:8]}"
+
+
+def get_user_session_expire_days() -> int:
+    raw_value = os.getenv("USER_SESSION_EXPIRE_DAYS", "7")
+    try:
+        return max(1, min(30, int(raw_value)))
+    except ValueError:
+        return 7
+
+
+def parse_datetime(value: Optional[datetime]) -> Optional[str]:
+    return value.isoformat() if value else None
+
+
+def is_expired(value: Optional[datetime]) -> bool:
+    if not value:
+        return False
+    current = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    return current <= utcnow()
+
+
+def extract_access_token(authorization: Optional[str], fallback_token: str = "") -> str:
+    raw_value = str(authorization or "").strip()
+    if raw_value:
+        scheme, _, token = raw_value.partition(" ")
+        if scheme.lower() == "bearer" and token.strip():
+            return token.strip()
+        if not token:
+            return raw_value
+    return str(fallback_token or "").strip()
+
+
+def create_audit_log(
+    db: Session,
+    *,
+    action: str,
+    target_type: str,
+    target_id: str,
+    actor_type: str = "system",
+    actor_code: str = "",
+    actor_user_id: Optional[int] = None,
+    detail: Optional[dict] = None,
+):
+    record = AuditLog(
+        actor_user_id=actor_user_id,
+        actor_type=actor_type,
+        actor_code=actor_code,
+        action=action,
+        target_type=target_type,
+        target_id=target_id,
+        detail_json=json.dumps(detail or {}, ensure_ascii=False),
+    )
+    db.add(record)
+    return record
+
+
+def create_task_execution_record(
+    db: Session,
+    *,
+    task_id: int,
+    event_type: str,
+    status_before: str,
+    status_after: str,
+    group_id: Optional[int] = None,
+    actor_user_id: Optional[int] = None,
+    worker_code: str = "",
+    worker_token_id: Optional[int] = None,
+    attempt_count: int = 0,
+    retry_count: int = 0,
+    error_message: str = "",
+    detail: Optional[dict] = None,
+):
+    record = TaskExecutionRecord(
+        task_id=task_id,
+        group_id=group_id,
+        actor_user_id=actor_user_id,
+        worker_code=worker_code,
+        worker_token_id=worker_token_id,
+        event_type=event_type,
+        status_before=status_before,
+        status_after=status_after,
+        attempt_count=attempt_count,
+        retry_count=retry_count,
+        error_message=error_message,
+        detail_json=json.dumps(detail or {}, ensure_ascii=False),
+    )
+    db.add(record)
+    return record
+
+
 def create_asset_record(
     db: Session,
     *,
     source_type: str,
+    group_id: Optional[int],
     bucket: str,
     key: str,
     prefix: str,
@@ -436,6 +630,7 @@ def create_asset_record(
 ):
     record = AssetRecord(
         source_type=source_type,
+        group_id=group_id,
         bucket=bucket,
         asset_key=key,
         prefix=prefix,
@@ -468,6 +663,7 @@ def ensure_asset_record_from_result(db: Session, task: TaskRecord, result: dict)
     return create_asset_record(
         db,
         source_type=asset.get("source_type", "worker"),
+        group_id=task.group_id,
         bucket=asset.get("bucket", get_bucket_name()),
         key=asset_key,
         prefix=asset.get("prefix", "processed"),
@@ -483,6 +679,7 @@ def serialize_asset_record(record: AssetRecord):
     return {
         "id": record.id,
         "source_type": record.source_type,
+        "group_id": record.group_id,
         "bucket": record.bucket,
         "key": record.asset_key,
         "prefix": record.prefix,
@@ -544,6 +741,9 @@ def serialize_task_record(record: TaskRecord):
         "source_value": record.source_value,
         "status": record.status,
         "priority": record.priority,
+        "group_id": record.group_id,
+        "created_by_user_id": record.created_by_user_id,
+        "triggered_by_user_id": record.triggered_by_user_id,
         "assigned_worker_code": record.assigned_worker_code,
         "payload": task_payload,
         "result": runtime_state,
@@ -577,6 +777,7 @@ def serialize_worker_node(record: WorkerNode):
     return {
         "id": record.id,
         "worker_code": record.worker_code,
+        "group_id": record.group_id,
         "display_name": record.display_name,
         "status": effective_status,
         "reported_status": record.status,
@@ -588,6 +789,104 @@ def serialize_worker_node(record: WorkerNode):
         "is_timed_out": effective_status == "offline" and record.status != "offline",
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,
+    }
+
+
+def serialize_user_account(record: UserAccount):
+    return {
+        "id": record.id,
+        "username": record.username,
+        "display_name": record.display_name,
+        "role": record.role,
+        "status": record.status,
+        "last_login_at": parse_datetime(record.last_login_at),
+        "created_at": parse_datetime(record.created_at),
+        "updated_at": parse_datetime(record.updated_at),
+    }
+
+
+def serialize_account_group(record: AccountGroup):
+    return {
+        "id": record.id,
+        "group_name": record.group_name,
+        "group_code": record.group_code,
+        "owner_user_id": record.owner_user_id,
+        "status": record.status,
+        "remark": record.remark,
+        "created_at": parse_datetime(record.created_at),
+        "updated_at": parse_datetime(record.updated_at),
+    }
+
+
+def serialize_group_member(record: UserGroupMember, user: Optional[UserAccount] = None):
+    return {
+        "id": record.id,
+        "group_id": record.group_id,
+        "user_id": record.user_id,
+        "member_role": record.member_role,
+        "user": serialize_user_account(user) if user else None,
+        "created_at": parse_datetime(record.created_at),
+    }
+
+
+def serialize_worker_token(record: WorkerToken, *, plain_token: str = ""):
+    return {
+        "id": record.id,
+        "worker_code": record.worker_code,
+        "token_name": record.token_name,
+        "group_id": record.group_id,
+        "issued_by_user_id": record.issued_by_user_id,
+        "status": record.status,
+        "expired_at": parse_datetime(record.expired_at),
+        "last_used_at": parse_datetime(record.last_used_at),
+        "created_at": parse_datetime(record.created_at),
+        "updated_at": parse_datetime(record.updated_at),
+        "plain_token": plain_token,
+    }
+
+
+def serialize_audit_log(record: AuditLog):
+    return {
+        "id": record.id,
+        "actor_user_id": record.actor_user_id,
+        "actor_type": record.actor_type,
+        "actor_code": record.actor_code,
+        "action": record.action,
+        "target_type": record.target_type,
+        "target_id": record.target_id,
+        "detail": load_json_field(record.detail_json, {}),
+        "created_at": parse_datetime(record.created_at),
+    }
+
+
+def serialize_user_session(record: UserSession):
+    return {
+        "id": record.id,
+        "user_id": record.user_id,
+        "status": record.status,
+        "expired_at": parse_datetime(record.expired_at),
+        "last_used_at": parse_datetime(record.last_used_at),
+        "created_at": parse_datetime(record.created_at),
+        "updated_at": parse_datetime(record.updated_at),
+    }
+
+
+def serialize_task_execution_record(record: TaskExecutionRecord):
+    return {
+        "id": record.id,
+        "task_id": record.task_id,
+        "group_id": record.group_id,
+        "actor_user_id": record.actor_user_id,
+        "worker_code": record.worker_code,
+        "worker_token_id": record.worker_token_id,
+        "event_type": record.event_type,
+        "status_before": record.status_before,
+        "status_after": record.status_after,
+        "attempt_count": record.attempt_count,
+        "retry_count": record.retry_count,
+        "error_message": record.error_message,
+        "detail": load_json_field(record.detail_json, {}),
+        "created_at": parse_datetime(record.created_at),
     }
 
 
@@ -612,6 +911,157 @@ def get_task_or_404(db: Session, task_id: int) -> TaskRecord:
     return record
 
 
+def get_user_or_404(db: Session, user_id: int) -> UserAccount:
+    record = db.scalar(select(UserAccount).where(UserAccount.id == user_id))
+    if not record:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return record
+
+
+def get_group_or_404(db: Session, group_id: int) -> AccountGroup:
+    record = db.scalar(select(AccountGroup).where(AccountGroup.id == group_id))
+    if not record:
+        raise HTTPException(status_code=404, detail="账号组不存在")
+    return record
+
+
+def get_group_member_or_404(db: Session, group_id: int, member_id: int) -> UserGroupMember:
+    record = db.scalar(
+        select(UserGroupMember).where(
+            UserGroupMember.group_id == group_id,
+            UserGroupMember.id == member_id,
+        )
+    )
+    if not record:
+        raise HTTPException(status_code=404, detail="成员记录不存在")
+    return record
+
+
+def get_worker_token_or_404(db: Session, token_id: int) -> WorkerToken:
+    record = db.scalar(select(WorkerToken).where(WorkerToken.id == token_id))
+    if not record:
+        raise HTTPException(status_code=404, detail="Worker Token 不存在")
+    return record
+
+
+def get_active_user_session_or_401(db: Session, authorization: Optional[str]) -> tuple[UserSession, UserAccount]:
+    access_token = extract_access_token(authorization)
+    if not access_token:
+        raise HTTPException(status_code=401, detail="缺少登录令牌")
+
+    session_record = db.scalar(
+        select(UserSession).where(UserSession.session_token_hash == hash_secret(access_token))
+    )
+    if not session_record or session_record.status != "active" or is_expired(session_record.expired_at):
+        raise HTTPException(status_code=401, detail="登录已失效，请重新登录")
+
+    user_record = get_user_or_404(db, session_record.user_id)
+    if user_record.status != "active":
+        raise HTTPException(status_code=403, detail="当前用户已被禁用")
+
+    session_record.last_used_at = utcnow()
+    return session_record, user_record
+
+
+def require_active_user(db: Session, authorization: Optional[str]) -> UserAccount:
+    _, user_record = get_active_user_session_or_401(db, authorization)
+    return user_record
+
+
+def should_allow_user_bootstrap(db: Session) -> bool:
+    return (db.scalar(select(func.count()).select_from(UserAccount)) or 0) == 0
+
+
+def is_admin_user(user: UserAccount) -> bool:
+    return (user.role or "").strip().lower() == "admin"
+
+
+def get_accessible_group_ids(db: Session, user: UserAccount) -> list[int]:
+    if is_admin_user(user):
+        return []
+    return list(
+        {
+            item.group_id
+            for item in db.scalars(
+                select(UserGroupMember).where(UserGroupMember.user_id == user.id)
+            ).all()
+        }
+    )
+
+
+def resolve_group_scope(
+    db: Session,
+    user: UserAccount,
+    requested_group_id: Optional[int],
+    *,
+    require_for_non_admin: bool = False,
+) -> Optional[list[int]]:
+    if requested_group_id is not None:
+        get_group_or_404(db, requested_group_id)
+        if not is_admin_user(user) and requested_group_id not in get_accessible_group_ids(db, user):
+            raise HTTPException(status_code=403, detail="无权访问当前账号组")
+        return [requested_group_id]
+
+    if is_admin_user(user):
+        return None
+
+    group_ids = get_accessible_group_ids(db, user)
+    if require_for_non_admin and not group_ids:
+        raise HTTPException(status_code=403, detail="当前用户未加入任何账号组")
+    return group_ids
+
+
+def apply_group_scope(statement, column, group_ids: Optional[list[int]]):
+    if group_ids is None:
+        return statement
+    return statement.where(column.in_(group_ids or [-1]))
+
+
+def resolve_effective_group_id(
+    db: Session,
+    user: UserAccount,
+    requested_group_id: Optional[int],
+    *,
+    required_for_non_admin_message: str,
+) -> Optional[int]:
+    if requested_group_id is not None:
+        resolve_group_scope(db, user, requested_group_id, require_for_non_admin=True)
+        return requested_group_id
+
+    if is_admin_user(user):
+        return None
+
+    group_ids = get_accessible_group_ids(db, user)
+    if len(group_ids) == 1:
+        return group_ids[0]
+
+    raise HTTPException(status_code=400, detail=required_for_non_admin_message)
+
+
+def get_active_worker_token_or_401(
+    db: Session,
+    *,
+    worker_code: str,
+    authorization: Optional[str],
+    x_worker_token: Optional[str],
+) -> WorkerToken:
+    access_token = extract_access_token(authorization, x_worker_token)
+    if not access_token:
+        raise HTTPException(status_code=401, detail="缺少 Worker Token")
+
+    token_record = db.scalar(
+        select(WorkerToken).where(WorkerToken.token_hash == hash_secret(access_token))
+    )
+    if not token_record or token_record.status != "active" or is_expired(token_record.expired_at):
+        raise HTTPException(status_code=401, detail="Worker Token 无效或已过期")
+
+    if token_record.worker_code != worker_code:
+        raise HTTPException(status_code=403, detail="Worker Token 与当前 Worker Code 不匹配")
+
+    token_record.last_used_at = utcnow()
+    return token_record
+
+
 @app.get("/health")
 def health(db: Session = Depends(get_db)):
     total_records = db.scalar(select(func.count()).select_from(AssetRecord)) or 0
@@ -619,21 +1069,42 @@ def health(db: Session = Depends(get_db)):
 
 
 @app.get("/dashboard/summary")
-def dashboard_summary(db: Session = Depends(get_db)):
-    total_records = db.scalar(select(func.count()).select_from(AssetRecord)) or 0
-    latest_record = db.scalar(select(AssetRecord).order_by(desc(AssetRecord.id)).limit(1))
-    total_tasks = db.scalar(select(func.count()).select_from(TaskRecord)) or 0
-    pending_tasks = db.scalar(
-        select(func.count()).select_from(TaskRecord).where(TaskRecord.status.in_(["pending", "queued"]))
+def dashboard_summary(
+    group_id: Optional[int] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    group_scope = resolve_group_scope(db, actor_user, group_id)
+    total_records = db.scalar(
+        apply_group_scope(select(func.count()).select_from(AssetRecord), AssetRecord.group_id, group_scope)
     ) or 0
-    worker_items = db.scalars(select(WorkerNode).order_by(desc(WorkerNode.id))).all()
+    latest_record = db.scalar(
+        apply_group_scope(select(AssetRecord).order_by(desc(AssetRecord.id)).limit(1), AssetRecord.group_id, group_scope)
+    )
+    total_tasks = db.scalar(
+        apply_group_scope(select(func.count()).select_from(TaskRecord), TaskRecord.group_id, group_scope)
+    ) or 0
+    pending_tasks = db.scalar(
+        apply_group_scope(
+            select(func.count()).select_from(TaskRecord).where(TaskRecord.status.in_(["pending", "queued"])),
+            TaskRecord.group_id,
+            group_scope,
+        )
+    ) or 0
+    worker_items = db.scalars(
+        apply_group_scope(select(WorkerNode).order_by(desc(WorkerNode.id)), WorkerNode.group_id, group_scope)
+    ).all()
     online_workers = len(
         [item for item in worker_items if get_effective_worker_status(item) in ["idle", "running", "online"]]
     )
-    latest_task = db.scalar(select(TaskRecord).order_by(desc(TaskRecord.id)).limit(1))
+    latest_task = db.scalar(
+        apply_group_scope(select(TaskRecord).order_by(desc(TaskRecord.id)).limit(1), TaskRecord.group_id, group_scope)
+    )
     latest_worker = worker_items[0] if worker_items else None
     return {
         "ok": True,
+        "group_id": group_id,
         "bucket": os.getenv("S3_BUCKET"),
         "storage_configured": bool(os.getenv("S3_BUCKET") and os.getenv("S3_ENDPOINT")),
         "database_configured": bool(os.getenv("DATABASE_URL")),
@@ -647,10 +1118,566 @@ def dashboard_summary(db: Session = Depends(get_db)):
     }
 
 
+@app.post("/auth/login")
+def auth_login(payload: LoginRequest, db: Session = Depends(get_db)):
+    username = payload.username.strip().lower()
+    user = db.scalar(select(UserAccount).where(UserAccount.username == username))
+    if not user or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="用户名或密码错误")
+    if user.status != "active":
+        raise HTTPException(status_code=403, detail="当前用户已被禁用")
+
+    plain_token = secrets.token_urlsafe(32)
+    session_record = UserSession(
+        user_id=user.id,
+        session_token_hash=hash_secret(plain_token),
+        status="active",
+        expired_at=utcnow() + timedelta(days=get_user_session_expire_days()),
+        last_used_at=utcnow(),
+    )
+    user.last_login_at = utcnow()
+    db.add(session_record)
+    create_audit_log(
+        db,
+        action="auth_login",
+        target_type="user",
+        target_id=str(user.id),
+        actor_type="user",
+        actor_code=user.username,
+        actor_user_id=user.id,
+        detail={"session_expire_days": get_user_session_expire_days()},
+    )
+    db.commit()
+    db.refresh(user)
+    db.refresh(session_record)
+    return {
+        "ok": True,
+        "item": {
+            "access_token": plain_token,
+            "user": serialize_user_account(user),
+            "session": serialize_user_session(session_record),
+        },
+    }
+
+
+@app.get("/auth/me")
+def auth_me(
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    session_record, user = get_active_user_session_or_401(db, authorization)
+    db.commit()
+    db.refresh(session_record)
+    db.refresh(user)
+    return {
+        "ok": True,
+        "item": {
+            "user": serialize_user_account(user),
+            "session": serialize_user_session(session_record),
+        },
+    }
+
+
+@app.post("/auth/logout")
+def auth_logout(
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    session_record, user = get_active_user_session_or_401(db, authorization)
+    session_record.status = "revoked"
+    session_record.last_used_at = utcnow()
+    create_audit_log(
+        db,
+        action="auth_logout",
+        target_type="session",
+        target_id=str(session_record.id),
+        actor_type="user",
+        actor_code=user.username,
+        actor_user_id=user.id,
+    )
+    db.commit()
+    db.refresh(session_record)
+    return {"ok": True, "item": serialize_user_session(session_record)}
+
+
+@app.get("/users")
+def list_users(
+    limit: int = Query(50, ge=1, le=200),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    require_active_user(db, authorization)
+    items = db.scalars(select(UserAccount).order_by(desc(UserAccount.id)).limit(limit)).all()
+    return {"ok": True, "items": [serialize_user_account(item) for item in items]}
+
+
+@app.post("/users")
+def create_user(
+    payload: CreateUserRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization) if not should_allow_user_bootstrap(db) else None
+    username = payload.username.strip().lower()
+    if not username:
+        raise HTTPException(status_code=400, detail="用户名不能为空")
+    existing = db.scalar(select(UserAccount).where(UserAccount.username == username))
+    if existing:
+        raise HTTPException(status_code=409, detail="用户名已存在")
+
+    record = UserAccount(
+        username=username,
+        password_hash=hash_password(payload.password),
+        display_name=payload.display_name.strip() or username,
+        role=payload.role.strip() or "admin",
+        status=payload.status.strip() or "active",
+    )
+    db.add(record)
+    create_audit_log(
+        db,
+        action="user_created",
+        target_type="user",
+        target_id=username,
+        actor_type="user" if actor_user else "system",
+        actor_code=actor_user.username if actor_user else "bootstrap",
+        actor_user_id=actor_user.id if actor_user else None,
+        detail={"role": record.role, "status": record.status},
+    )
+    db.commit()
+    db.refresh(record)
+    return {"ok": True, "item": serialize_user_account(record)}
+
+
+@app.patch("/users/{user_id}")
+def update_user(
+    user_id: int,
+    payload: UpdateUserRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    record = get_user_or_404(db, user_id)
+    if payload.display_name is not None:
+        record.display_name = payload.display_name.strip() or record.display_name
+    if payload.role is not None:
+        record.role = payload.role.strip() or record.role
+    if payload.status is not None:
+        record.status = payload.status.strip() or record.status
+    if payload.password:
+        record.password_hash = hash_password(payload.password)
+    create_audit_log(
+        db,
+        action="user_updated",
+        target_type="user",
+        target_id=str(record.id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"role": record.role, "status": record.status},
+    )
+    db.commit()
+    db.refresh(record)
+    return {"ok": True, "item": serialize_user_account(record)}
+
+
+@app.get("/groups")
+def list_groups(
+    limit: int = Query(50, ge=1, le=200),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    statement = select(AccountGroup).order_by(desc(AccountGroup.id)).limit(limit)
+    statement = apply_group_scope(statement, AccountGroup.id, resolve_group_scope(db, actor_user, None))
+    items = db.scalars(statement).all()
+    return {"ok": True, "items": [serialize_account_group(item) for item in items]}
+
+
+@app.post("/groups")
+def create_group(
+    payload: CreateGroupRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    group_name = payload.group_name.strip()
+    if not group_name:
+        raise HTTPException(status_code=400, detail="账号组名称不能为空")
+    group_code = normalize_code(payload.group_code or group_name, "group")
+    existing = db.scalar(select(AccountGroup).where(AccountGroup.group_code == group_code))
+    if existing:
+        raise HTTPException(status_code=409, detail="账号组编码已存在")
+
+    if payload.owner_user_id is not None:
+        get_user_or_404(db, payload.owner_user_id)
+
+    record = AccountGroup(
+        group_name=group_name,
+        group_code=group_code,
+        owner_user_id=payload.owner_user_id,
+        status=payload.status.strip() or "active",
+        remark=payload.remark.strip(),
+    )
+    db.add(record)
+    db.flush()
+    if payload.owner_user_id is not None:
+        db.add(
+            UserGroupMember(
+                user_id=payload.owner_user_id,
+                group_id=record.id,
+                member_role="owner",
+            )
+        )
+    create_audit_log(
+        db,
+        action="group_created",
+        target_type="group",
+        target_id=group_code,
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"owner_user_id": payload.owner_user_id},
+    )
+    db.commit()
+    db.refresh(record)
+    return {"ok": True, "item": serialize_account_group(record)}
+
+
+@app.patch("/groups/{group_id}")
+def update_group(
+    group_id: int,
+    payload: UpdateGroupRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    record = get_group_or_404(db, group_id)
+    if payload.group_name is not None:
+        record.group_name = payload.group_name.strip() or record.group_name
+    if payload.owner_user_id is not None:
+        get_user_or_404(db, payload.owner_user_id)
+        record.owner_user_id = payload.owner_user_id
+    if payload.status is not None:
+        record.status = payload.status.strip() or record.status
+    if payload.remark is not None:
+        record.remark = payload.remark.strip()
+    create_audit_log(
+        db,
+        action="group_updated",
+        target_type="group",
+        target_id=str(group_id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"status": record.status},
+    )
+    db.commit()
+    db.refresh(record)
+    return {"ok": True, "item": serialize_account_group(record)}
+
+
+@app.get("/groups/{group_id}/members")
+def list_group_members(
+    group_id: int,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    resolve_group_scope(db, actor_user, group_id)
+    get_group_or_404(db, group_id)
+    items = db.scalars(
+        select(UserGroupMember)
+        .where(UserGroupMember.group_id == group_id)
+        .order_by(desc(UserGroupMember.id))
+    ).all()
+    users = {
+        user.id: user
+        for user in db.scalars(
+            select(UserAccount).where(UserAccount.id.in_([item.user_id for item in items] or [-1]))
+        ).all()
+    }
+    return {
+        "ok": True,
+        "items": [serialize_group_member(item, users.get(item.user_id)) for item in items],
+    }
+
+
+@app.post("/groups/{group_id}/members")
+def create_group_member(
+    group_id: int,
+    payload: CreateGroupMemberRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    resolve_group_scope(db, actor_user, group_id)
+    get_group_or_404(db, group_id)
+    user = get_user_or_404(db, payload.user_id)
+    existing = db.scalar(
+        select(UserGroupMember).where(
+            UserGroupMember.group_id == group_id,
+            UserGroupMember.user_id == payload.user_id,
+        )
+    )
+    if existing:
+        raise HTTPException(status_code=409, detail="该用户已在当前账号组中")
+    record = UserGroupMember(
+        group_id=group_id,
+        user_id=payload.user_id,
+        member_role=payload.member_role.strip() or "editor",
+    )
+    db.add(record)
+    create_audit_log(
+        db,
+        action="group_member_created",
+        target_type="group_member",
+        target_id=f"{group_id}:{payload.user_id}",
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"member_role": record.member_role},
+    )
+    db.commit()
+    db.refresh(record)
+    return {"ok": True, "item": serialize_group_member(record, user)}
+
+
+@app.patch("/groups/{group_id}/members/{member_id}")
+def update_group_member(
+    group_id: int,
+    member_id: int,
+    payload: UpdateGroupMemberRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    resolve_group_scope(db, actor_user, group_id)
+    record = get_group_member_or_404(db, group_id, member_id)
+    record.member_role = payload.member_role.strip() or record.member_role
+    user = get_user_or_404(db, record.user_id)
+    create_audit_log(
+        db,
+        action="group_member_updated",
+        target_type="group_member",
+        target_id=str(member_id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"member_role": record.member_role},
+    )
+    db.commit()
+    db.refresh(record)
+    return {"ok": True, "item": serialize_group_member(record, user)}
+
+
+@app.get("/worker-tokens")
+def list_worker_tokens(
+    group_id: Optional[int] = Query(default=None),
+    limit: int = Query(50, ge=1, le=200),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    statement = select(WorkerToken).order_by(desc(WorkerToken.id)).limit(limit)
+    statement = apply_group_scope(
+        statement,
+        WorkerToken.group_id,
+        resolve_group_scope(db, actor_user, group_id),
+    )
+    items = db.scalars(statement).all()
+    return {"ok": True, "items": [serialize_worker_token(item) for item in items]}
+
+
+@app.post("/worker-tokens")
+def create_worker_token(
+    payload: CreateWorkerTokenRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    worker_code = payload.worker_code.strip()
+    if not worker_code:
+        raise HTTPException(status_code=400, detail="Worker Code 不能为空")
+    if payload.group_id is None and not is_admin_user(actor_user):
+        raise HTTPException(status_code=400, detail="非管理员签发 Worker Token 必须指定账号组")
+    group_scope = resolve_group_scope(
+        db,
+        actor_user,
+        payload.group_id,
+        require_for_non_admin=True,
+    )
+    if payload.issued_by_user_id is not None:
+        get_user_or_404(db, payload.issued_by_user_id)
+
+    plain_token = secrets.token_urlsafe(24)
+    record = WorkerToken(
+        worker_code=worker_code,
+        token_name=payload.token_name.strip() or f"{worker_code}-token",
+        token_hash=hash_secret(plain_token),
+        group_id=(group_scope[0] if group_scope else payload.group_id),
+        issued_by_user_id=payload.issued_by_user_id,
+        status="active",
+        expired_at=utcnow() + timedelta(days=payload.expire_days),
+    )
+    db.add(record)
+    create_audit_log(
+        db,
+        action="worker_token_created",
+        target_type="worker_token",
+        target_id=worker_code,
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"group_id": payload.group_id, "expire_days": payload.expire_days},
+    )
+    db.commit()
+    db.refresh(record)
+    return {"ok": True, "item": serialize_worker_token(record, plain_token=plain_token)}
+
+
+@app.post("/worker-tokens/{token_id}/revoke")
+def revoke_worker_token(
+    token_id: int,
+    payload: RevokeWorkerTokenRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    record = get_worker_token_or_404(db, token_id)
+    if record.group_id is None and not is_admin_user(actor_user):
+        raise HTTPException(status_code=403, detail="当前用户无权操作未归组的 Worker Token")
+    resolve_group_scope(db, actor_user, record.group_id)
+    record.status = "revoked"
+    create_audit_log(
+        db,
+        action="worker_token_revoked",
+        target_type="worker_token",
+        target_id=str(token_id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"reason": payload.reason},
+    )
+    db.commit()
+    db.refresh(record)
+    return {"ok": True, "item": serialize_worker_token(record)}
+
+
+@app.get("/audit-logs")
+def list_audit_logs(
+    limit: int = Query(50, ge=1, le=200),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    require_active_user(db, authorization)
+    items = db.scalars(select(AuditLog).order_by(desc(AuditLog.id)).limit(limit)).all()
+    return {"ok": True, "items": [serialize_audit_log(item) for item in items]}
+
+
+@app.get("/task-executions")
+def list_task_executions(
+    task_id: int = Query(0, ge=0),
+    worker_code: str = Query(""),
+    group_id: Optional[int] = Query(default=None),
+    limit: int = Query(50, ge=1, le=200),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    group_scope = resolve_group_scope(db, actor_user, group_id)
+    statement = select(TaskExecutionRecord).order_by(desc(TaskExecutionRecord.id)).limit(limit)
+    if task_id > 0:
+        statement = (
+            select(TaskExecutionRecord)
+            .where(TaskExecutionRecord.task_id == task_id)
+            .order_by(desc(TaskExecutionRecord.id))
+            .limit(limit)
+        )
+    statement = apply_group_scope(
+        statement,
+        TaskExecutionRecord.group_id,
+        group_scope,
+    )
+    if worker_code.strip():
+        statement = statement.where(TaskExecutionRecord.worker_code == worker_code.strip())
+    items = db.scalars(statement).all()
+    return {"ok": True, "items": [serialize_task_execution_record(item) for item in items]}
+
+
+@app.post("/worker/register")
+def register_worker(
+    payload: WorkerRegisterRequest,
+    authorization: Optional[str] = Header(default=None),
+    x_worker_token: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    worker_code = payload.worker_code.strip()
+    if not worker_code:
+        raise HTTPException(status_code=400, detail="Worker Code 不能为空")
+
+    token_record = get_active_worker_token_or_401(
+        db,
+        worker_code=worker_code,
+        authorization=authorization,
+        x_worker_token=x_worker_token,
+    )
+    record = db.scalar(select(WorkerNode).where(WorkerNode.worker_code == worker_code))
+    if not record:
+        record = WorkerNode(
+            worker_code=worker_code,
+            group_id=token_record.group_id,
+            display_name=payload.display_name.strip() or worker_code,
+            status="idle",
+            machine_info=payload.machine_info.strip(),
+            capabilities=json.dumps(payload.capabilities, ensure_ascii=False),
+            current_task_title="",
+            heartbeat_note=payload.heartbeat_note.strip() or "Worker 已完成注册",
+            last_heartbeat_at=utcnow(),
+        )
+        db.add(record)
+    else:
+        record.group_id = token_record.group_id
+        record.display_name = payload.display_name.strip() or record.display_name
+        record.status = "idle"
+        record.machine_info = payload.machine_info.strip()
+        record.capabilities = json.dumps(payload.capabilities, ensure_ascii=False)
+        record.heartbeat_note = payload.heartbeat_note.strip() or "Worker 已重新注册"
+        record.last_heartbeat_at = utcnow()
+
+    create_audit_log(
+        db,
+        action="worker_registered",
+        target_type="worker",
+        target_id=worker_code,
+        actor_type="worker",
+        actor_code=worker_code,
+        detail={"worker_token_id": token_record.id, "group_id": token_record.group_id},
+    )
+    db.commit()
+    db.refresh(record)
+    db.refresh(token_record)
+    return {
+        "ok": True,
+        "item": serialize_worker_node(record),
+        "worker_token": serialize_worker_token(token_record),
+    }
+
+
 @app.post("/assets/upload-text")
-def upload_text(payload: UploadTextRequest, db: Session = Depends(get_db)):
+def upload_text(
+    payload: UploadTextRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
     client = get_s3_client()
     bucket = get_bucket_name()
+    effective_group_id = resolve_effective_group_id(
+        db,
+        actor_user,
+        payload.group_id,
+        required_for_non_admin_message="非管理员上传文件必须指定账号组",
+    )
 
     filename = payload.filename or f"{uuid.uuid4().hex}.txt"
     prefix = payload.prefix.strip("/") or "assets"
@@ -668,6 +1695,7 @@ def upload_text(payload: UploadTextRequest, db: Session = Depends(get_db)):
         record = create_asset_record(
             db,
             source_type="text",
+            group_id=effective_group_id,
             bucket=bucket,
             key=key,
             prefix=prefix,
@@ -692,10 +1720,19 @@ def upload_text(payload: UploadTextRequest, db: Session = Depends(get_db)):
 async def upload_file(
     file: UploadFile = File(...),
     prefix: str = Query("assets"),
+    group_id: Optional[int] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
+    actor_user = require_active_user(db, authorization)
     client = get_s3_client()
     bucket = get_bucket_name()
+    effective_group_id = resolve_effective_group_id(
+        db,
+        actor_user,
+        group_id,
+        required_for_non_admin_message="非管理员上传文件必须指定账号组",
+    )
 
     normalized_prefix = prefix.strip("/") or "assets"
     original_name = file.filename or "upload.bin"
@@ -714,6 +1751,7 @@ async def upload_file(
         record = create_asset_record(
             db,
             source_type="file",
+            group_id=effective_group_id,
             bucket=bucket,
             key=key,
             prefix=normalized_prefix,
@@ -742,21 +1780,39 @@ async def upload_file(
 @app.get("/assets/list")
 def list_assets(
     prefix: str = Query("assets"),
+    group_id: Optional[int] = Query(default=None),
     limit: int = Query(20, ge=1, le=100),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
 ):
+    actor_user = require_active_user(db, authorization)
     client = get_s3_client()
     bucket = get_bucket_name()
     normalized_prefix = prefix.strip("/")
+    group_scope = resolve_group_scope(db, actor_user, group_id)
+    allowed_keys = None
+    if group_scope is not None:
+        allowed_keys = set(
+            db.scalars(
+                apply_group_scope(
+                    select(AssetRecord.asset_key).where(AssetRecord.prefix == normalized_prefix),
+                    AssetRecord.group_id,
+                    group_scope,
+                )
+            ).all()
+        )
 
     try:
         response = client.list_objects_v2(
             Bucket=bucket,
             Prefix=f"{normalized_prefix}/" if normalized_prefix else "",
-            MaxKeys=limit,
+            MaxKeys=limit if allowed_keys is None else max(limit * 5, 100),
         )
         items = []
         for obj in response.get("Contents", []):
             key = obj["Key"]
+            if allowed_keys is not None and key not in allowed_keys:
+                continue
             items.append(
                 {
                     "key": key,
@@ -765,11 +1821,14 @@ def list_assets(
                     "url": build_object_url(key),
                 }
             )
+            if len(items) >= limit:
+                break
 
         return {
             "ok": True,
             "bucket": bucket,
             "prefix": normalized_prefix,
+            "group_id": group_id,
             "items": items,
         }
     except (BotoCoreError, ClientError) as e:
@@ -779,20 +1838,24 @@ def list_assets(
 @app.get("/assets/records")
 def list_asset_records(
     prefix: str = Query("assets"),
+    group_id: Optional[int] = Query(default=None),
     limit: int = Query(20, ge=1, le=100),
+    authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
+    actor_user = require_active_user(db, authorization)
     normalized_prefix = prefix.strip("/")
-    statement = (
-        select(AssetRecord)
-        .where(AssetRecord.prefix == normalized_prefix)
-        .order_by(desc(AssetRecord.id))
-        .limit(limit)
+    statement = select(AssetRecord).where(AssetRecord.prefix == normalized_prefix).order_by(desc(AssetRecord.id)).limit(limit)
+    statement = apply_group_scope(
+        statement,
+        AssetRecord.group_id,
+        resolve_group_scope(db, actor_user, group_id),
     )
     records = db.scalars(statement).all()
     return {
         "ok": True,
         "prefix": normalized_prefix,
+        "group_id": group_id,
         "items": [serialize_asset_record(record) for record in records],
     }
 
@@ -801,9 +1864,19 @@ def list_asset_records(
 def presign_get_url(
     key: str,
     expires_in: int = Query(3600, ge=60, le=86400),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
 ):
+    actor_user = require_active_user(db, authorization)
     client = get_s3_client()
     bucket = get_bucket_name()
+    record = db.scalar(select(AssetRecord).where(AssetRecord.asset_key == key).order_by(desc(AssetRecord.id)))
+    if record:
+        if record.group_id is None and not is_admin_user(actor_user):
+            raise HTTPException(status_code=403, detail="当前用户无权访问未归组资产")
+        resolve_group_scope(db, actor_user, record.group_id)
+    elif not is_admin_user(actor_user):
+        raise HTTPException(status_code=403, detail="当前用户无权访问未登记资产")
 
     try:
         url = client.generate_presigned_url(
@@ -823,15 +1896,26 @@ def presign_get_url(
 
 
 @app.delete("/assets")
-def delete_asset(key: str, db: Session = Depends(get_db)):
+def delete_asset(
+    key: str,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
     client = get_s3_client()
     bucket = get_bucket_name()
+    record = db.scalar(
+        select(AssetRecord).where(AssetRecord.asset_key == key).order_by(desc(AssetRecord.id))
+    )
+    if record:
+        if record.group_id is None and not is_admin_user(actor_user):
+            raise HTTPException(status_code=403, detail="当前用户无权删除未归组资产")
+        resolve_group_scope(db, actor_user, record.group_id)
+    elif not is_admin_user(actor_user):
+        raise HTTPException(status_code=403, detail="当前用户无权删除未登记资产")
 
     try:
         client.delete_object(Bucket=bucket, Key=key)
-        record = db.scalar(
-            select(AssetRecord).where(AssetRecord.asset_key == key).order_by(desc(AssetRecord.id))
-        )
         if record:
             record.status = "deleted"
             db.commit()
@@ -846,7 +1930,22 @@ def delete_asset(key: str, db: Session = Depends(get_db)):
 
 
 @app.post("/tasks")
-def create_task(payload: CreateTaskRequest, db: Session = Depends(get_db)):
+def create_task(
+    payload: CreateTaskRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    if payload.group_id is None and not is_admin_user(actor_user):
+        raise HTTPException(status_code=400, detail="非管理员创建任务必须指定账号组")
+    group_scope = resolve_group_scope(
+        db,
+        actor_user,
+        payload.group_id,
+        require_for_non_admin=True,
+    )
+    effective_group_id = group_scope[0] if group_scope else payload.group_id
+
     normalized_payload = normalize_task_payload(payload.payload)
     runtime_state = {
         "attempt_count": 0,
@@ -864,10 +1963,38 @@ def create_task(payload: CreateTaskRequest, db: Session = Depends(get_db)):
         source_value=payload.source_value,
         status="pending",
         priority=payload.priority,
+        group_id=effective_group_id,
+        created_by_user_id=actor_user.id,
+        triggered_by_user_id=actor_user.id,
         payload_json=json.dumps(normalized_payload, ensure_ascii=False),
         result_json=json.dumps(runtime_state, ensure_ascii=False),
     )
     db.add(record)
+    db.flush()
+    create_task_execution_record(
+        db,
+        task_id=record.id,
+        group_id=record.group_id,
+        actor_user_id=actor_user.id,
+        event_type="created",
+        status_before="",
+        status_after=record.status,
+        detail={
+            "title": record.title,
+            "task_type": record.task_type,
+            "source_type": record.source_type,
+        },
+    )
+    create_audit_log(
+        db,
+        action="task_created",
+        target_type="task",
+        target_id=str(record.id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"group_id": record.group_id, "priority": record.priority},
+    )
     db.commit()
     db.refresh(record)
     return {"ok": True, "item": serialize_task_record(record)}
@@ -876,37 +2003,66 @@ def create_task(payload: CreateTaskRequest, db: Session = Depends(get_db)):
 @app.get("/tasks")
 def list_tasks(
     status: str = Query("", description="按状态过滤"),
+    group_id: Optional[int] = Query(default=None, description="按账号组过滤"),
     limit: int = Query(20, ge=1, le=100),
+    authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
+    actor_user = require_active_user(db, authorization)
     statement = select(TaskRecord).order_by(desc(TaskRecord.id)).limit(limit)
+    statement = apply_group_scope(
+        statement,
+        TaskRecord.group_id,
+        resolve_group_scope(db, actor_user, group_id),
+    )
     if status:
-        statement = (
-            select(TaskRecord)
-            .where(TaskRecord.status == status)
-            .order_by(desc(TaskRecord.id))
-            .limit(limit)
-        )
+        statement = statement.where(TaskRecord.status == status)
     items = db.scalars(statement).all()
     return {"ok": True, "items": [serialize_task_record(item) for item in items]}
 
 
 @app.get("/tasks/summary")
-def tasks_summary(db: Session = Depends(get_db)):
-    total = db.scalar(select(func.count()).select_from(TaskRecord)) or 0
+def tasks_summary(
+    group_id: Optional[int] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    group_scope = resolve_group_scope(db, actor_user, group_id)
+    total = db.scalar(
+        apply_group_scope(select(func.count()).select_from(TaskRecord), TaskRecord.group_id, group_scope)
+    ) or 0
     pending = db.scalar(
-        select(func.count()).select_from(TaskRecord).where(TaskRecord.status.in_(["pending", "queued"]))
+        apply_group_scope(
+            select(func.count()).select_from(TaskRecord).where(TaskRecord.status.in_(["pending", "queued"])),
+            TaskRecord.group_id,
+            group_scope,
+        )
     ) or 0
     running = db.scalar(
-        select(func.count()).select_from(TaskRecord).where(TaskRecord.status == "running")
+        apply_group_scope(
+            select(func.count()).select_from(TaskRecord).where(TaskRecord.status == "running"),
+            TaskRecord.group_id,
+            group_scope,
+        )
     ) or 0
     success = db.scalar(
-        select(func.count()).select_from(TaskRecord).where(TaskRecord.status == "success")
+        apply_group_scope(
+            select(func.count()).select_from(TaskRecord).where(TaskRecord.status == "success"),
+            TaskRecord.group_id,
+            group_scope,
+        )
     ) or 0
     failed = db.scalar(
-        select(func.count()).select_from(TaskRecord).where(TaskRecord.status == "failed")
+        apply_group_scope(
+            select(func.count()).select_from(TaskRecord).where(TaskRecord.status == "failed"),
+            TaskRecord.group_id,
+            group_scope,
+        )
     ) or 0
-    latest = db.scalar(select(TaskRecord).order_by(desc(TaskRecord.id)).limit(1))
+    latest = db.scalar(
+        apply_group_scope(select(TaskRecord).order_by(desc(TaskRecord.id)).limit(1), TaskRecord.group_id, group_scope)
+    )
     return {
         "ok": True,
         "total": total,
@@ -919,11 +2075,50 @@ def tasks_summary(db: Session = Depends(get_db)):
 
 
 @app.post("/workers/heartbeat")
-def worker_heartbeat(payload: WorkerHeartbeatRequest, db: Session = Depends(get_db)):
+def worker_heartbeat(
+    payload: WorkerHeartbeatRequest,
+    authorization: Optional[str] = Header(default=None),
+    x_worker_token: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    access_token = extract_access_token(authorization, x_worker_token)
+    actor_user = None
+    token_record = None
+    if access_token:
+        session_record = db.scalar(
+            select(UserSession).where(UserSession.session_token_hash == hash_secret(access_token))
+        )
+        if session_record and session_record.status == "active" and not is_expired(session_record.expired_at):
+            actor_user = get_user_or_404(db, session_record.user_id)
+            if actor_user.status != "active":
+                raise HTTPException(status_code=403, detail="当前用户已被禁用")
+            session_record.last_used_at = utcnow()
+        else:
+            token_record = get_active_worker_token_or_401(
+                db,
+                worker_code=payload.worker_code,
+                authorization=authorization,
+                x_worker_token=x_worker_token,
+            )
+
+    if not actor_user and not token_record:
+        raise HTTPException(status_code=401, detail="提交 Worker 心跳需要用户会话或 Worker Token")
+
+    effective_group_id = (
+        token_record.group_id
+        if token_record
+        else resolve_effective_group_id(
+            db,
+            actor_user,
+            payload.group_id,
+            required_for_non_admin_message="非管理员登记 Worker 节点必须指定账号组",
+        )
+    )
     record = db.scalar(select(WorkerNode).where(WorkerNode.worker_code == payload.worker_code))
     if not record:
         record = WorkerNode(
             worker_code=payload.worker_code,
+            group_id=effective_group_id,
             display_name=payload.display_name,
             status=payload.status,
             machine_info=payload.machine_info,
@@ -934,6 +2129,7 @@ def worker_heartbeat(payload: WorkerHeartbeatRequest, db: Session = Depends(get_
         )
         db.add(record)
     else:
+        record.group_id = effective_group_id
         record.display_name = payload.display_name
         record.status = payload.status
         record.machine_info = payload.machine_info
@@ -947,14 +2143,34 @@ def worker_heartbeat(payload: WorkerHeartbeatRequest, db: Session = Depends(get_
 
 
 @app.get("/workers")
-def list_workers(limit: int = Query(20, ge=1, le=100), db: Session = Depends(get_db)):
-    items = db.scalars(select(WorkerNode).order_by(desc(WorkerNode.id)).limit(limit)).all()
+def list_workers(
+    group_id: Optional[int] = Query(default=None),
+    limit: int = Query(20, ge=1, le=100),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    statement = select(WorkerNode).order_by(desc(WorkerNode.id)).limit(limit)
+    statement = apply_group_scope(
+        statement,
+        WorkerNode.group_id,
+        resolve_group_scope(db, actor_user, group_id),
+    )
+    items = db.scalars(statement).all()
     return {"ok": True, "items": [serialize_worker_node(item) for item in items]}
 
 
 @app.delete("/workers/{worker_code}")
-def delete_worker(worker_code: str, db: Session = Depends(get_db)):
+def delete_worker(
+    worker_code: str,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
     worker = get_worker_or_404(db, worker_code)
+    if worker.group_id is None and not is_admin_user(actor_user):
+        raise HTTPException(status_code=403, detail="当前用户无权删除未归组 Worker 节点")
+    resolve_group_scope(db, actor_user, worker.group_id)
 
     running_task = db.scalar(
         select(TaskRecord)
@@ -974,14 +2190,34 @@ def delete_worker(worker_code: str, db: Session = Depends(get_db)):
         task.assigned_worker_code = ""
 
     deleted_item = serialize_worker_node(worker)
+    create_audit_log(
+        db,
+        action="worker_deleted",
+        target_type="worker",
+        target_id=worker_code,
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"cleared_task_count": len(assigned_tasks)},
+    )
     db.delete(worker)
     db.commit()
     return {"ok": True, "item": deleted_item, "cleared_task_count": len(assigned_tasks)}
 
 
 @app.get("/workers/summary")
-def workers_summary(db: Session = Depends(get_db)):
-    items = db.scalars(select(WorkerNode).order_by(desc(WorkerNode.id))).all()
+def workers_summary(
+    group_id: Optional[int] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    statement = apply_group_scope(
+        select(WorkerNode).order_by(desc(WorkerNode.id)),
+        WorkerNode.group_id,
+        resolve_group_scope(db, actor_user, group_id),
+    )
+    items = db.scalars(statement).all()
     total = len(items)
     online = len([item for item in items if get_effective_worker_status(item) in ["idle", "running", "online"]])
     offline = total - online
@@ -996,9 +2232,19 @@ def workers_summary(db: Session = Depends(get_db)):
 
 
 @app.patch("/tasks/{task_id}")
-def update_task(task_id: int, payload: UpdateTaskRequest, db: Session = Depends(get_db)):
+def update_task(
+    task_id: int,
+    payload: UpdateTaskRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
     record = get_task_or_404(db, task_id)
+    if record.group_id is None and not is_admin_user(actor_user):
+        raise HTTPException(status_code=403, detail="当前用户无权修改未归组任务")
+    resolve_group_scope(db, actor_user, record.group_id)
 
+    previous_status = record.status
     previous_worker_code = record.assigned_worker_code
     worker_record = None
     if payload.assigned_worker_code is not None:
@@ -1009,6 +2255,8 @@ def update_task(task_id: int, payload: UpdateTaskRequest, db: Session = Depends(
             )
             if not worker_record:
                 raise HTTPException(status_code=404, detail="指定的 Worker 不存在")
+            if worker_record.group_id != record.group_id:
+                raise HTTPException(status_code=409, detail="指定 Worker 不属于当前任务账号组")
             record.assigned_worker_code = normalized_worker_code
         else:
             record.assigned_worker_code = ""
@@ -1018,6 +2266,8 @@ def update_task(task_id: int, payload: UpdateTaskRequest, db: Session = Depends(
 
     if payload.result is not None:
         save_task_runtime_state(record, payload.result)
+
+    record.triggered_by_user_id = actor_user.id
 
     if previous_worker_code and previous_worker_code != record.assigned_worker_code:
         previous_worker = db.scalar(select(WorkerNode).where(WorkerNode.worker_code == previous_worker_code))
@@ -1044,14 +2294,50 @@ def update_task(task_id: int, payload: UpdateTaskRequest, db: Session = Depends(
                 assigned_worker.status = "idle"
             assigned_worker.heartbeat_note = f"最近处理任务 #{record.id} 状态：{record.status}"
 
+    create_task_execution_record(
+        db,
+        task_id=record.id,
+        group_id=record.group_id,
+        actor_user_id=actor_user.id,
+        event_type="manually_updated",
+        status_before=previous_status,
+        status_after=record.status,
+        worker_code=record.assigned_worker_code,
+        attempt_count=int(get_task_runtime_state(record).get("attempt_count", 0)),
+        retry_count=int(get_task_runtime_state(record).get("retry_count", 0)),
+        detail={"assigned_worker_code": record.assigned_worker_code},
+    )
+    create_audit_log(
+        db,
+        action="task_updated",
+        target_type="task",
+        target_id=str(record.id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"status": record.status, "assigned_worker_code": record.assigned_worker_code},
+    )
     db.commit()
     db.refresh(record)
     return {"ok": True, "item": serialize_task_record(record)}
 
 
 @app.post("/worker/tasks/claim")
-def claim_task(payload: WorkerTaskClaimRequest, db: Session = Depends(get_db)):
+def claim_task(
+    payload: WorkerTaskClaimRequest,
+    authorization: Optional[str] = Header(default=None),
+    x_worker_token: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    token_record = get_active_worker_token_or_401(
+        db,
+        worker_code=payload.worker_code,
+        authorization=authorization,
+        x_worker_token=x_worker_token,
+    )
     worker = get_worker_or_404(db, payload.worker_code)
+    if worker.group_id != token_record.group_id:
+        raise HTTPException(status_code=409, detail="当前 Worker 节点归组与 Worker Token 不一致")
     current_running_task = db.scalar(
         select(TaskRecord)
         .where(
@@ -1064,17 +2350,18 @@ def claim_task(payload: WorkerTaskClaimRequest, db: Session = Depends(get_db)):
     if current_running_task:
         return {"ok": True, "item": serialize_task_record(current_running_task), "reused": True}
 
-    task = db.scalar(
+    statement = (
         select(TaskRecord)
-        .where(
-            TaskRecord.status.in_(["pending", "queued"]),
-        )
+        .where(TaskRecord.status.in_(["pending", "queued"]))
         .order_by(
             case((TaskRecord.priority == "high", 0), else_=1),
             TaskRecord.id,
         )
         .limit(1)
     )
+    if token_record.group_id is not None:
+        statement = statement.where(TaskRecord.group_id == token_record.group_id)
+    task = db.scalar(statement)
     if not task:
         if get_effective_worker_status(worker) != "offline":
             worker.status = "idle"
@@ -1089,51 +2376,112 @@ def claim_task(payload: WorkerTaskClaimRequest, db: Session = Depends(get_db)):
     append_task_history(state, "claimed", worker_code=payload.worker_code)
     save_task_runtime_state(task, state)
 
+    previous_status = task.status
     task.status = "running"
     task.assigned_worker_code = payload.worker_code
     worker.status = "running"
     worker.current_task_title = task.title
     worker.heartbeat_note = f"已领取任务 #{task.id}"
     worker.last_heartbeat_at = utcnow()
+    create_task_execution_record(
+        db,
+        task_id=task.id,
+        group_id=task.group_id,
+        event_type="claimed",
+        status_before=previous_status,
+        status_after=task.status,
+        worker_code=payload.worker_code,
+        worker_token_id=token_record.id,
+        attempt_count=int(state.get("attempt_count", 0)),
+        retry_count=int(state.get("retry_count", 0)),
+        detail={"reused": False, "priority": task.priority},
+    )
     db.commit()
     db.refresh(task)
     return {"ok": True, "item": serialize_task_record(task), "reused": False}
 
 
 @app.post("/worker/tasks/{task_id}/complete")
-def complete_task(task_id: int, payload: WorkerTaskCompleteRequest, db: Session = Depends(get_db)):
+def complete_task(
+    task_id: int,
+    payload: WorkerTaskCompleteRequest,
+    authorization: Optional[str] = Header(default=None),
+    x_worker_token: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    token_record = get_active_worker_token_or_401(
+        db,
+        worker_code=payload.worker_code,
+        authorization=authorization,
+        x_worker_token=x_worker_token,
+    )
     task = get_task_or_404(db, task_id)
+    if token_record.group_id is not None and task.group_id != token_record.group_id:
+        raise HTTPException(status_code=403, detail="当前 Worker Token 无权完成其他账号组任务")
     if task.assigned_worker_code != payload.worker_code:
         raise HTTPException(status_code=409, detail="该任务未分配给当前 Worker")
 
     worker = get_worker_or_404(db, payload.worker_code)
+    if worker.group_id != token_record.group_id:
+        raise HTTPException(status_code=409, detail="当前 Worker 节点归组与 Worker Token 不一致")
     state = get_task_runtime_state(task)
     state["last_error"] = ""
     state["output"] = payload.result
     append_task_history(state, "completed", worker_code=payload.worker_code)
     save_task_runtime_state(task, state)
 
+    previous_status = task.status
     task.status = "success"
     ensure_asset_record_from_result(db, task, payload.result)
     set_worker_idle_if_online(worker, f"最近完成任务 #{task.id}")
     worker.last_heartbeat_at = utcnow()
+    create_task_execution_record(
+        db,
+        task_id=task.id,
+        group_id=task.group_id,
+        event_type="completed",
+        status_before=previous_status,
+        status_after=task.status,
+        worker_code=payload.worker_code,
+        worker_token_id=token_record.id,
+        attempt_count=int(state.get("attempt_count", 0)),
+        retry_count=int(state.get("retry_count", 0)),
+        detail={"result": payload.result},
+    )
     db.commit()
     db.refresh(task)
     return {"ok": True, "item": serialize_task_record(task)}
 
 
 @app.post("/worker/tasks/{task_id}/fail")
-def fail_task(task_id: int, payload: WorkerTaskFailRequest, db: Session = Depends(get_db)):
+def fail_task(
+    task_id: int,
+    payload: WorkerTaskFailRequest,
+    authorization: Optional[str] = Header(default=None),
+    x_worker_token: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    token_record = get_active_worker_token_or_401(
+        db,
+        worker_code=payload.worker_code,
+        authorization=authorization,
+        x_worker_token=x_worker_token,
+    )
     task = get_task_or_404(db, task_id)
+    if token_record.group_id is not None and task.group_id != token_record.group_id:
+        raise HTTPException(status_code=403, detail="当前 Worker Token 无权回写其他账号组任务")
     if task.assigned_worker_code != payload.worker_code:
         raise HTTPException(status_code=409, detail="该任务未分配给当前 Worker")
 
     worker = get_worker_or_404(db, payload.worker_code)
+    if worker.group_id != token_record.group_id:
+        raise HTTPException(status_code=409, detail="当前 Worker 节点归组与 Worker Token 不一致")
     state = get_task_runtime_state(task)
     max_retries = int(state.get("max_retries", 2))
     next_retry_count = int(state.get("retry_count", 0))
     will_retry = payload.retryable and next_retry_count < max_retries
 
+    previous_status = task.status
     if will_retry:
         next_retry_count += 1
         state["retry_count"] = next_retry_count
@@ -1160,19 +2508,42 @@ def fail_task(task_id: int, payload: WorkerTaskFailRequest, db: Session = Depend
         f"任务 #{task.id} {'已进入重试队列' if will_retry else '执行失败'}",
     )
     worker.last_heartbeat_at = utcnow()
+    create_task_execution_record(
+        db,
+        task_id=task.id,
+        group_id=task.group_id,
+        event_type="retry_queued" if will_retry else "failed",
+        status_before=previous_status,
+        status_after=task.status,
+        worker_code=payload.worker_code,
+        worker_token_id=token_record.id,
+        attempt_count=int(state.get("attempt_count", 0)),
+        retry_count=int(state.get("retry_count", 0)),
+        error_message=payload.error_message,
+        detail={"retryable": payload.retryable, "result": payload.result},
+    )
     db.commit()
     db.refresh(task)
     return {"ok": True, "item": serialize_task_record(task), "will_retry": will_retry}
 
 
 @app.post("/tasks/{task_id}/retry")
-def retry_task(task_id: int, db: Session = Depends(get_db)):
+def retry_task(
+    task_id: int,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
     task = get_task_or_404(db, task_id)
+    if task.group_id is None and not is_admin_user(actor_user):
+        raise HTTPException(status_code=403, detail="当前用户无权重试未归组任务")
+    resolve_group_scope(db, actor_user, task.group_id)
     state = get_task_runtime_state(task)
     state["manual_retry_count"] = int(state.get("manual_retry_count", 0)) + 1
     state["last_error"] = ""
     append_task_history(state, "manual_retry")
     save_task_runtime_state(task, state)
+    previous_status = task.status
 
     if task.assigned_worker_code:
         worker = db.scalar(select(WorkerNode).where(WorkerNode.worker_code == task.assigned_worker_code))
@@ -1181,6 +2552,29 @@ def retry_task(task_id: int, db: Session = Depends(get_db)):
 
     task.assigned_worker_code = ""
     task.status = "queued"
+    task.triggered_by_user_id = actor_user.id
+    create_task_execution_record(
+        db,
+        task_id=task.id,
+        group_id=task.group_id,
+        actor_user_id=actor_user.id,
+        event_type="manual_retry",
+        status_before=previous_status,
+        status_after=task.status,
+        attempt_count=int(state.get("attempt_count", 0)),
+        retry_count=int(state.get("retry_count", 0)),
+        detail={"manual_retry_count": int(state.get("manual_retry_count", 0))},
+    )
+    create_audit_log(
+        db,
+        action="task_retried",
+        target_type="task",
+        target_id=str(task.id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"group_id": task.group_id, "manual_retry_count": int(state.get("manual_retry_count", 0))},
+    )
     db.commit()
     db.refresh(task)
     return {"ok": True, "item": serialize_task_record(task)}

@@ -5,6 +5,7 @@ import {
   DashboardShell,
   Section,
   SummaryCard,
+  authFetch,
   buttonStyle,
   formatDate,
   inputStyle,
@@ -26,6 +27,8 @@ const tableCellStyle = {
 
 export default function WorkersPageClient() {
   const [workers, setWorkers] = useState([]);
+  const [groups, setGroups] = useState([]);
+  const [workerGroupFilter, setWorkerGroupFilter] = useState("");
   const [workerSummary, setWorkerSummary] = useState({
     total: 0,
     online: 0,
@@ -38,15 +41,18 @@ export default function WorkersPageClient() {
     worker_code: "worker-cn-001",
     display_name: "深圳一号机",
     status: "idle",
+    group_id: "",
     machine_info: "Windows 11 / RTX 4060 / Clash",
     capabilities: "yt-dlp,ffmpeg,moviepy,upload-r2",
     current_task_title: "",
     heartbeat_note: "已连接 API，等待拉取任务",
   });
 
-  async function loadWorkers() {
+  async function loadWorkers(groupId = workerGroupFilter) {
     try {
-      const data = await readJson(await fetch("/api/workers", { cache: "no-store" }));
+      const data = await readJson(
+        await authFetch(`/api/workers?group_id=${encodeURIComponent(groupId)}`, { cache: "no-store" })
+      );
       setWorkers(data.items || []);
     } catch (error) {
       setWorkers([]);
@@ -54,18 +60,30 @@ export default function WorkersPageClient() {
     }
   }
 
-  async function loadWorkerSummary() {
+  async function loadWorkerSummary(groupId = workerGroupFilter) {
     try {
-      const data = await readJson(await fetch("/api/workers/summary", { cache: "no-store" }));
+      const data = await readJson(
+        await authFetch(`/api/workers/summary?group_id=${encodeURIComponent(groupId)}`, { cache: "no-store" })
+      );
       setWorkerSummary(data);
     } catch (error) {
       setMessage(error.message || "获取 Worker 摘要失败");
     }
   }
 
-  async function reloadAll() {
+  async function loadGroups() {
+    try {
+      const data = await readJson(await authFetch("/api/groups", { cache: "no-store" }));
+      setGroups(data.items || []);
+    } catch (error) {
+      setGroups([]);
+      setMessage(error.message || "获取账号组失败");
+    }
+  }
+
+  async function reloadAll(groupId = workerGroupFilter) {
     setMessage("正在刷新 Worker 节点...");
-    await Promise.all([loadWorkers(), loadWorkerSummary()]);
+    await Promise.all([loadWorkers(groupId), loadWorkerSummary(groupId), loadGroups()]);
     setMessage("Worker 节点已刷新");
   }
 
@@ -79,11 +97,12 @@ export default function WorkersPageClient() {
     setMessage("正在提交 Worker 心跳...");
     try {
       const data = await readJson(
-        await fetch("/api/workers/heartbeat", {
+        await authFetch("/api/workers/heartbeat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             ...workerForm,
+            group_id: workerForm.group_id ? Number(workerForm.group_id) : null,
             capabilities: workerForm.capabilities
               .split(",")
               .map((item) => item.trim())
@@ -92,7 +111,8 @@ export default function WorkersPageClient() {
         })
       );
       setMessage(`Worker 已更新：${data.item.display_name}`);
-      await reloadAll();
+      setWorkerGroupFilter(workerForm.group_id || "");
+      await reloadAll(workerForm.group_id || "");
     } catch (error) {
       setMessage(error.message || "提交 Worker 心跳失败");
     } finally {
@@ -110,7 +130,7 @@ export default function WorkersPageClient() {
     setMessage(`正在删除节点 ${workerCode}...`);
     try {
       const data = await readJson(
-        await fetch(`/api/workers/${encodeURIComponent(workerCode)}`, {
+        await authFetch(`/api/workers/${encodeURIComponent(workerCode)}`, {
           method: "DELETE",
         })
       );
@@ -155,7 +175,7 @@ export default function WorkersPageClient() {
       title="Worker 节点"
       description="这里专门看节点在线状态、心跳时间和当前任务，方便判断算力是否可用。"
       action={
-        <button type="button" style={buttonStyle} onClick={reloadAll}>
+        <button type="button" style={buttonStyle} onClick={() => reloadAll()}>
           刷新节点
         </button>
       }
@@ -200,21 +220,33 @@ export default function WorkersPageClient() {
               placeholder="显示名称"
             />
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <select
+                style={inputStyle}
+                value={workerForm.group_id}
+                onChange={(event) => setWorkerForm((prev) => ({ ...prev, group_id: event.target.value }))}
+              >
+                <option value="">归属账号组</option>
+                {groups.map((group) => (
+                  <option key={group.id} value={group.id}>
+                    {group.group_name}
+                  </option>
+                ))}
+              </select>
               <input
                 style={inputStyle}
                 value={workerForm.status}
                 onChange={(event) => setWorkerForm((prev) => ({ ...prev, status: event.target.value }))}
                 placeholder="状态"
               />
-              <input
-                style={inputStyle}
-                value={workerForm.current_task_title}
-                onChange={(event) =>
-                  setWorkerForm((prev) => ({ ...prev, current_task_title: event.target.value }))
-                }
-                placeholder="当前任务"
-              />
             </div>
+            <input
+              style={inputStyle}
+              value={workerForm.current_task_title}
+              onChange={(event) =>
+                setWorkerForm((prev) => ({ ...prev, current_task_title: event.target.value }))
+              }
+              placeholder="当前任务"
+            />
             <input
               style={inputStyle}
               value={workerForm.machine_info}
@@ -240,6 +272,24 @@ export default function WorkersPageClient() {
         </Section>
 
         <Section title="节点列表" hint="运营视角默认只看节点、状态、当前任务、心跳时间。">
+          <div style={{ marginBottom: 12, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <select
+              style={{ ...inputStyle, width: 180 }}
+              value={workerGroupFilter}
+              onChange={(event) => {
+                const nextValue = event.target.value;
+                setWorkerGroupFilter(nextValue);
+                reloadAll(nextValue);
+              }}
+            >
+              <option value="">全部账号组</option>
+              {groups.map((group) => (
+                <option key={group.id} value={group.id}>
+                  {group.group_name}
+                </option>
+              ))}
+            </select>
+          </div>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
               <thead>
@@ -264,7 +314,9 @@ export default function WorkersPageClient() {
                     <tr key={item.id}>
                       <td style={tableCellStyle}>
                         <div>{item.display_name}</div>
-                        <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>{item.worker_code}</div>
+                        <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
+                          {item.worker_code} / 组 {item.group_id || "-"}
+                        </div>
                       </td>
                       <td style={tableCellStyle}>
                         <div>{item.status}</div>
