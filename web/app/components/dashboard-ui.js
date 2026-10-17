@@ -45,6 +45,8 @@ const navItems = [
   { href: "/", label: "首页总览", hint: "只看状态和入口" },
   { href: "/tasks", label: "任务中心", hint: "创建、分配、重试" },
   { href: "/agent-flow", label: "AI文案工作流", hint: "选题、提示词、文案" },
+  { href: "/publish", label: "发布中心", hint: "承接草稿、继续发布" },
+  { href: "/accounts", label: "平台账号", hint: "OAuth、账号绑定、归组" },
   { href: "/workers", label: "Worker 节点", hint: "节点在线、心跳、状态" },
   { href: "/files", label: "文件中心", hint: "R2 文件和数据库记录" },
   { href: "/access", label: "访问控制", hint: "用户、账号组、凭证、审计" },

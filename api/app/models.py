@@ -110,6 +110,68 @@ class UserSession(Base):
     )
 
 
+class PlatformAccount(Base):
+    __tablename__ = "platform_accounts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("account_groups.id"), nullable=True, index=True)
+    platform: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    platform_user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    account_name: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    account_handle: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    profile_url: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
+    avatar_url: Mapped[str] = mapped_column(String(2048), nullable=False, default="")
+    auth_type: Mapped[str] = mapped_column(String(50), nullable=False, default="oauth2")
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="active")
+    connected_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True, index=True)
+    access_token: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    refresh_token: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    token_type: Mapped[str] = mapped_column(String(50), nullable=False, default="Bearer")
+    token_expires_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    scope_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    profile_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    last_synced_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class OAuthSession(Base):
+    __tablename__ = "oauth_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("user_accounts.id"), nullable=False, index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("account_groups.id"), nullable=True, index=True)
+    platform: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    state_token_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    redirect_uri: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
+    code_verifier: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
+    requested_scope_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    error_message: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
+    expired_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
 class AuditLog(Base):
     __tablename__ = "audit_logs"
 

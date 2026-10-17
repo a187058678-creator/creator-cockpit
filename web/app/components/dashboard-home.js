@@ -211,6 +211,18 @@ export default function DashboardHome() {
           meta="独立页面，和普通任务中心分开操作"
         />
         <EntryCard
+          href="/publish"
+          title="发布中心"
+          hint="承接 AI 文案草稿，继续整理标题、正文、提示词和视频地址。"
+          meta="当前是轻量承接页，后面继续接正式发布任务"
+        />
+        <EntryCard
+          href="/accounts"
+          title="平台账号"
+          hint="统一绑定 TikTok、YouTube、Facebook、Instagram、X 平台账号。"
+          meta="按账号组做 OAuth 接入和账号归组"
+        />
+        <EntryCard
           href="/workers"
           title="Worker 节点"
           hint="查看节点在线状态、心跳时间、当前任务，必要时手动登记测试节点。"

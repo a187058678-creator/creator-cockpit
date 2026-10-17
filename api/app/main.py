@@ -1,17 +1,22 @@
 import os
 import json
 import uuid
+import base64
 import hashlib
 import secrets
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+from urllib import error as urllib_error
+from urllib import parse as urllib_parse
+from urllib import request as urllib_request
 
 import boto3
 from botocore.client import Config
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, Request, UploadFile
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import case, desc, func, select
 from sqlalchemy.orm import Session
@@ -21,6 +26,8 @@ from app.models import (
     AccountGroup,
     AssetRecord,
     AuditLog,
+    OAuthSession,
+    PlatformAccount,
     TaskRecord,
     TaskExecutionRecord,
     UserAccount,
@@ -42,6 +49,8 @@ app = FastAPI(title="Creator Cockpit API", lifespan=lifespan)
 
 TASK_PAYLOAD_SCHEMA_VERSION = "creator-task/v1"
 ALLOWED_DEDUPE_PROFILES = {"light", "balanced", "aggressive"}
+META_GRAPH_API_VERSION = os.getenv("META_GRAPH_API_VERSION", "v23.0")
+SUPPORTED_PLATFORM_CODES = ["tiktok", "youtube", "facebook", "instagram", "x"]
 
 
 def clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -557,6 +566,13 @@ class WorkerRegisterRequest(BaseModel):
     heartbeat_note: str = ""
 
 
+class UpdatePlatformAccountRequest(BaseModel):
+    group_id: Optional[int] = None
+    account_name: Optional[str] = None
+    account_handle: Optional[str] = None
+    status: Optional[str] = None
+
+
 def get_required_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
@@ -654,6 +670,369 @@ def extract_access_token(authorization: Optional[str], fallback_token: str = "")
         if not token:
             return raw_value
     return str(fallback_token or "").strip()
+
+
+def get_web_public_base_url() -> str:
+    value = (
+        os.getenv("WEB_PUBLIC_BASE_URL")
+        or os.getenv("NEXT_PUBLIC_WEB_BASE_URL")
+        or "http://localhost:5173"
+    )
+    return value.rstrip("/")
+
+
+def get_api_public_base_url(request: Request) -> str:
+    configured = os.getenv("API_PUBLIC_BASE_URL", "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return str(request.base_url).rstrip("/")
+
+
+def build_oauth_callback_url(request: Request, platform: str) -> str:
+    return f"{get_api_public_base_url(request)}/oauth/{platform}/callback"
+
+
+def build_accounts_redirect_url(platform: str, status: str, message: str) -> str:
+    query = urllib_parse.urlencode(
+        {
+            "oauth_platform": platform,
+            "oauth_status": status,
+            "oauth_message": message,
+        }
+    )
+    return f"{get_web_public_base_url()}/accounts?{query}"
+
+
+def split_scope_string(value: Any) -> list[str]:
+    raw_value = str(value or "").replace(",", " ")
+    return [item.strip() for item in raw_value.split() if item.strip()]
+
+
+def get_platform_config(platform: str) -> dict:
+    normalized = str(platform or "").strip().lower()
+    if normalized not in SUPPORTED_PLATFORM_CODES:
+        raise HTTPException(status_code=404, detail="暂不支持当前平台")
+
+    meta_auth_url = f"https://www.facebook.com/{META_GRAPH_API_VERSION}/dialog/oauth"
+    meta_token_url = f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/oauth/access_token"
+    configs = {
+        "tiktok": {
+            "code": "tiktok",
+            "label": "TikTok",
+            "client_id_env": "TIKTOK_CLIENT_KEY",
+            "client_secret_env": "TIKTOK_CLIENT_SECRET",
+            "auth_url": "https://www.tiktok.com/v2/auth/authorize/",
+            "token_url": "https://open.tiktokapis.com/v2/oauth/token/",
+            "profile_mode": "tiktok",
+            "default_scopes": ["user.info.basic", "video.list", "video.upload"],
+            "scope_separator": ",",
+            "authorization_client_param": "client_key",
+            "token_client_param": "client_key",
+            "requires_client_secret": True,
+            "pkce_required": False,
+        },
+        "youtube": {
+            "code": "youtube",
+            "label": "YouTube",
+            "client_id_env": "YOUTUBE_CLIENT_ID",
+            "client_secret_env": "YOUTUBE_CLIENT_SECRET",
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+            "token_url": "https://oauth2.googleapis.com/token",
+            "profile_mode": "youtube",
+            "default_scopes": [
+                "openid",
+                "email",
+                "profile",
+                "https://www.googleapis.com/auth/youtube.upload",
+            ],
+            "scope_separator": " ",
+            "authorization_client_param": "client_id",
+            "token_client_param": "client_id",
+            "requires_client_secret": True,
+            "pkce_required": False,
+        },
+        "facebook": {
+            "code": "facebook",
+            "label": "Facebook",
+            "client_id_env": "FACEBOOK_CLIENT_ID",
+            "client_secret_env": "FACEBOOK_CLIENT_SECRET",
+            "auth_url": meta_auth_url,
+            "token_url": meta_token_url,
+            "profile_mode": "facebook",
+            "default_scopes": ["pages_show_list", "pages_read_engagement", "pages_manage_posts"],
+            "scope_separator": ",",
+            "authorization_client_param": "client_id",
+            "token_client_param": "client_id",
+            "requires_client_secret": True,
+            "pkce_required": False,
+        },
+        "instagram": {
+            "code": "instagram",
+            "label": "Instagram",
+            "client_id_env": "INSTAGRAM_CLIENT_ID",
+            "client_secret_env": "INSTAGRAM_CLIENT_SECRET",
+            "auth_url": meta_auth_url,
+            "token_url": meta_token_url,
+            "profile_mode": "instagram",
+            "default_scopes": [
+                "pages_show_list",
+                "pages_read_engagement",
+                "instagram_basic",
+                "instagram_content_publish",
+            ],
+            "scope_separator": ",",
+            "authorization_client_param": "client_id",
+            "token_client_param": "client_id",
+            "requires_client_secret": True,
+            "pkce_required": False,
+        },
+        "x": {
+            "code": "x",
+            "label": "X",
+            "client_id_env": "X_CLIENT_ID",
+            "client_secret_env": "X_CLIENT_SECRET",
+            "auth_url": "https://x.com/i/oauth2/authorize",
+            "token_url": "https://api.x.com/2/oauth2/token",
+            "profile_mode": "x",
+            "default_scopes": ["tweet.read", "tweet.write", "users.read", "offline.access"],
+            "scope_separator": " ",
+            "authorization_client_param": "client_id",
+            "token_client_param": "client_id",
+            "requires_client_secret": False,
+            "pkce_required": True,
+        },
+    }
+
+    config = deepcopy(configs[normalized])
+    client_id = os.getenv(config["client_id_env"], "").strip()
+    client_secret_env = config.get("client_secret_env") or ""
+    client_secret = os.getenv(client_secret_env, "").strip() if client_secret_env else ""
+    configured_scopes = os.getenv(f"{normalized.upper()}_OAUTH_SCOPES", "").strip()
+    scopes = split_scope_string(configured_scopes) or config["default_scopes"]
+
+    config["client_id"] = client_id
+    config["client_secret"] = client_secret
+    config["scopes"] = scopes
+    config["enabled"] = bool(client_id and (client_secret or not config.get("requires_client_secret", False)))
+    return config
+
+
+def generate_code_verifier() -> str:
+    return secrets.token_urlsafe(64)
+
+
+def build_code_challenge(code_verifier: str) -> str:
+    digest = hashlib.sha256(code_verifier.encode("utf-8")).digest()
+    return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
+
+
+def encode_basic_auth(username: str, password: str) -> str:
+    raw = f"{username}:{password}".encode("utf-8")
+    return base64.b64encode(raw).decode("utf-8")
+
+
+def make_http_request_json(
+    method: str,
+    url: str,
+    *,
+    headers: Optional[dict[str, str]] = None,
+    form_data: Optional[dict[str, Any]] = None,
+    json_body: Optional[dict[str, Any]] = None,
+) -> dict:
+    body = None
+    request_headers = {"Accept": "application/json", **(headers or {})}
+    if form_data is not None:
+        body = urllib_parse.urlencode(form_data).encode("utf-8")
+        request_headers.setdefault("Content-Type", "application/x-www-form-urlencoded")
+    elif json_body is not None:
+        body = json.dumps(json_body).encode("utf-8")
+        request_headers.setdefault("Content-Type", "application/json")
+
+    request = urllib_request.Request(url, data=body, method=method.upper(), headers=request_headers)
+    try:
+        with urllib_request.urlopen(request, timeout=60) as response:
+            raw_body = response.read().decode("utf-8")
+            return json.loads(raw_body) if raw_body else {}
+    except urllib_error.HTTPError as error:
+        error_body = error.read().decode("utf-8", errors="ignore")
+        try:
+            parsed_error = json.loads(error_body) if error_body else {}
+        except json.JSONDecodeError:
+            parsed_error = {"detail": error_body or str(error)}
+        message = (
+            parsed_error.get("error_description")
+            or parsed_error.get("message")
+            or parsed_error.get("detail")
+            or error_body
+            or str(error)
+        )
+        raise HTTPException(status_code=400, detail=f"OAuth 请求失败：{message}") from error
+    except urllib_error.URLError as error:
+        raise HTTPException(status_code=400, detail=f"OAuth 请求失败：{error.reason}") from error
+
+
+def build_query_url(url: str, params: Optional[dict[str, Any]] = None) -> str:
+    if not params:
+        return url
+    query_string = urllib_parse.urlencode(params, doseq=True)
+    return f"{url}{'&' if '?' in url else '?'}{query_string}"
+
+
+def get_oauth_provider_cards() -> list[dict]:
+    return [
+        {
+            "code": item["code"],
+            "label": item["label"],
+            "enabled": item["enabled"],
+            "scopes": item["scopes"],
+            "pkce_required": item["pkce_required"],
+        }
+        for item in (get_platform_config(code) for code in SUPPORTED_PLATFORM_CODES)
+    ]
+
+
+def fetch_platform_profile(platform: str, access_token: str) -> dict:
+    if platform == "tiktok":
+        response = make_http_request_json(
+            "GET",
+            build_query_url(
+                "https://open.tiktokapis.com/v2/user/info/",
+                {"fields": "open_id,union_id,avatar_url,display_name,username,profile_deep_link"},
+            ),
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        user = response.get("data", {}).get("user", {})
+        username = str(user.get("username") or "").strip()
+        return {
+            "platform_user_id": str(user.get("open_id") or user.get("union_id") or ""),
+            "account_name": str(user.get("display_name") or username or "TikTok Account"),
+            "account_handle": f"@{username}" if username else "",
+            "profile_url": str(user.get("profile_deep_link") or ""),
+            "avatar_url": str(user.get("avatar_url") or ""),
+            "profile": user,
+        }
+
+    if platform == "youtube":
+        user = make_http_request_json(
+            "GET",
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        email = str(user.get("email") or "").strip()
+        return {
+            "platform_user_id": str(user.get("id") or email),
+            "account_name": str(user.get("name") or email or "YouTube Account"),
+            "account_handle": email,
+            "profile_url": "",
+            "avatar_url": str(user.get("picture") or ""),
+            "profile": user,
+        }
+
+    if platform == "facebook":
+        user = make_http_request_json(
+            "GET",
+            build_query_url(
+                f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/me",
+                {"fields": "id,name,picture.type(large){url}", "access_token": access_token},
+            ),
+        )
+        return {
+            "platform_user_id": str(user.get("id") or ""),
+            "account_name": str(user.get("name") or "Facebook Account"),
+            "account_handle": str(user.get("name") or ""),
+            "profile_url": "",
+            "avatar_url": str(user.get("picture", {}).get("data", {}).get("url") or ""),
+            "profile": user,
+        }
+
+    if platform == "instagram":
+        page_data = make_http_request_json(
+            "GET",
+            build_query_url(
+                f"https://graph.facebook.com/{META_GRAPH_API_VERSION}/me/accounts",
+                {
+                    "fields": "id,name,instagram_business_account{id,username,profile_picture_url}",
+                    "access_token": access_token,
+                },
+            ),
+        )
+        for page in page_data.get("data", []) or []:
+            instagram_account = page.get("instagram_business_account") or {}
+            if instagram_account.get("id"):
+                username = str(instagram_account.get("username") or "").strip()
+                return {
+                    "platform_user_id": str(instagram_account.get("id") or ""),
+                    "account_name": username or str(page.get("name") or "Instagram Account"),
+                    "account_handle": f"@{username}" if username else "",
+                    "profile_url": f"https://www.instagram.com/{username}/" if username else "",
+                    "avatar_url": str(instagram_account.get("profile_picture_url") or ""),
+                    "profile": {"page": page, "instagram_business_account": instagram_account},
+                }
+        raise HTTPException(status_code=400, detail="当前授权下未找到可绑定的 Instagram Business 账号")
+
+    if platform == "x":
+        response = make_http_request_json(
+            "GET",
+            build_query_url(
+                "https://api.x.com/2/users/me",
+                {"user.fields": "profile_image_url,username,name,verified"},
+            ),
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        user = response.get("data", {})
+        username = str(user.get("username") or "").strip()
+        return {
+            "platform_user_id": str(user.get("id") or ""),
+            "account_name": str(user.get("name") or username or "X Account"),
+            "account_handle": f"@{username}" if username else "",
+            "profile_url": f"https://x.com/{username}" if username else "",
+            "avatar_url": str(user.get("profile_image_url") or ""),
+            "profile": user,
+        }
+
+    raise HTTPException(status_code=400, detail="暂不支持当前平台资料拉取")
+
+
+def exchange_oauth_code(platform: str, config: dict, code: str, redirect_uri: str, code_verifier: str) -> dict:
+    token_payload = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }
+    token_headers = {}
+
+    token_client_param = config.get("token_client_param", "client_id")
+    if config.get("client_id"):
+        token_payload[token_client_param] = config["client_id"]
+    if config.get("client_secret"):
+        token_payload["client_secret"] = config["client_secret"]
+
+    if platform == "x":
+        token_payload["code_verifier"] = code_verifier
+        if config.get("client_secret"):
+            token_headers["Authorization"] = f"Basic {encode_basic_auth(config['client_id'], config['client_secret'])}"
+
+    response = make_http_request_json(
+        "POST",
+        config["token_url"],
+        headers=token_headers,
+        form_data=token_payload,
+    )
+    token_data = response.get("data", response)
+    expires_in = clamp_int(token_data.get("expires_in"), 0, 0, 315360000)
+    refresh_token = str(token_data.get("refresh_token") or "")
+    access_token = str(token_data.get("access_token") or "")
+    scopes = split_scope_string(token_data.get("scope")) or config["scopes"]
+    if not access_token:
+        raise HTTPException(status_code=400, detail="OAuth 回调成功，但未返回 access_token")
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": str(token_data.get("token_type") or "Bearer"),
+        "scopes": scopes,
+        "expires_at": utcnow() + timedelta(seconds=expires_in) if expires_in else None,
+        "raw_token": token_data,
+    }
 
 
 def create_audit_log(
@@ -1029,6 +1408,46 @@ def serialize_user_session(record: UserSession):
     }
 
 
+def serialize_platform_account(record: PlatformAccount):
+    scopes = ensure_str_list(load_json_field(record.scope_json, []))
+    profile = load_json_field(record.profile_json, {})
+    return {
+        "id": record.id,
+        "group_id": record.group_id,
+        "platform": record.platform,
+        "platform_user_id": record.platform_user_id,
+        "account_name": record.account_name,
+        "account_handle": record.account_handle,
+        "profile_url": record.profile_url,
+        "avatar_url": record.avatar_url,
+        "auth_type": record.auth_type,
+        "status": record.status,
+        "connected_by_user_id": record.connected_by_user_id,
+        "token_expires_at": parse_datetime(record.token_expires_at),
+        "scopes": scopes,
+        "profile": profile,
+        "last_synced_at": parse_datetime(record.last_synced_at),
+        "created_at": parse_datetime(record.created_at),
+        "updated_at": parse_datetime(record.updated_at),
+    }
+
+
+def serialize_oauth_session(record: OAuthSession):
+    return {
+        "id": record.id,
+        "user_id": record.user_id,
+        "group_id": record.group_id,
+        "platform": record.platform,
+        "status": record.status,
+        "requested_scopes": ensure_str_list(load_json_field(record.requested_scope_json, [])),
+        "error_message": record.error_message,
+        "expired_at": parse_datetime(record.expired_at),
+        "completed_at": parse_datetime(record.completed_at),
+        "created_at": parse_datetime(record.created_at),
+        "updated_at": parse_datetime(record.updated_at),
+    }
+
+
 def serialize_task_execution_record(record: TaskExecutionRecord):
     return {
         "id": record.id,
@@ -1185,6 +1604,20 @@ def get_worker_token_or_404(db: Session, token_id: int) -> WorkerToken:
     record = db.scalar(select(WorkerToken).where(WorkerToken.id == token_id))
     if not record:
         raise HTTPException(status_code=404, detail="Worker Token 不存在")
+    return record
+
+
+def get_platform_account_or_404(db: Session, account_id: int) -> PlatformAccount:
+    record = db.scalar(select(PlatformAccount).where(PlatformAccount.id == account_id))
+    if not record:
+        raise HTTPException(status_code=404, detail="平台账号不存在")
+    return record
+
+
+def get_oauth_session_by_state_or_404(db: Session, state: str) -> OAuthSession:
+    record = db.scalar(select(OAuthSession).where(OAuthSession.state_token_hash == hash_secret(state)))
+    if not record:
+        raise HTTPException(status_code=404, detail="OAuth 会话不存在或已过期")
     return record
 
 
@@ -1442,6 +1875,291 @@ def auth_logout(
     db.commit()
     db.refresh(session_record)
     return {"ok": True, "item": serialize_user_session(session_record)}
+
+
+@app.get("/oauth/providers")
+def list_oauth_providers(
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    require_active_user(db, authorization)
+    return {"ok": True, "items": get_oauth_provider_cards()}
+
+
+@app.get("/oauth-sessions")
+def list_oauth_sessions(
+    platform: str = Query("", description="按平台过滤"),
+    group_id: Optional[int] = Query(default=None),
+    limit: int = Query(20, ge=1, le=100),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    statement = select(OAuthSession).order_by(desc(OAuthSession.id)).limit(limit)
+    statement = apply_group_scope(statement, OAuthSession.group_id, resolve_group_scope(db, actor_user, group_id))
+    if platform:
+        statement = statement.where(OAuthSession.platform == platform.strip().lower())
+    items = db.scalars(statement).all()
+    return {"ok": True, "items": [serialize_oauth_session(item) for item in items]}
+
+
+@app.get("/platform-accounts")
+def list_platform_accounts(
+    platform: str = Query("", description="按平台过滤"),
+    status: str = Query("", description="按状态过滤"),
+    group_id: Optional[int] = Query(default=None),
+    limit: int = Query(50, ge=1, le=200),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    statement = select(PlatformAccount).order_by(desc(PlatformAccount.id)).limit(limit)
+    statement = apply_group_scope(statement, PlatformAccount.group_id, resolve_group_scope(db, actor_user, group_id))
+    if platform:
+        statement = statement.where(PlatformAccount.platform == platform.strip().lower())
+    if status:
+        statement = statement.where(PlatformAccount.status == status.strip().lower())
+    items = db.scalars(statement).all()
+    return {"ok": True, "items": [serialize_platform_account(item) for item in items]}
+
+
+@app.patch("/platform-accounts/{account_id}")
+def update_platform_account(
+    account_id: int,
+    payload: UpdatePlatformAccountRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    record = get_platform_account_or_404(db, account_id)
+    if record.group_id is not None:
+        resolve_group_scope(db, actor_user, record.group_id)
+    if payload.group_id is not None:
+        resolve_group_scope(db, actor_user, payload.group_id, require_for_non_admin=True)
+        get_group_or_404(db, payload.group_id)
+        record.group_id = payload.group_id
+    if payload.account_name is not None:
+        record.account_name = payload.account_name.strip() or record.account_name
+    if payload.account_handle is not None:
+        record.account_handle = payload.account_handle.strip()
+    if payload.status is not None:
+        record.status = payload.status.strip().lower() or record.status
+    create_audit_log(
+        db,
+        action="platform_account_updated",
+        target_type="platform_account",
+        target_id=str(record.id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"platform": record.platform, "group_id": record.group_id, "status": record.status},
+    )
+    db.commit()
+    db.refresh(record)
+    return {"ok": True, "item": serialize_platform_account(record)}
+
+
+@app.get("/oauth/{platform}/start")
+def oauth_start(
+    platform: str,
+    request: Request,
+    group_id: Optional[int] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    config = get_platform_config(platform)
+    if not config["enabled"]:
+        raise HTTPException(status_code=400, detail=f"{config['label']} OAuth 还没有配置 client_id / secret")
+
+    effective_group_id = resolve_effective_group_id(
+        db,
+        actor_user,
+        group_id,
+        required_for_non_admin_message="请先选择要绑定到哪个账号组",
+    )
+    redirect_uri = build_oauth_callback_url(request, config["code"])
+    state_token = secrets.token_urlsafe(32)
+    code_verifier = generate_code_verifier() if config.get("pkce_required") else ""
+    session_record = OAuthSession(
+        user_id=actor_user.id,
+        group_id=effective_group_id,
+        platform=config["code"],
+        state_token_hash=hash_secret(state_token),
+        redirect_uri=redirect_uri,
+        code_verifier=code_verifier,
+        status="pending",
+        requested_scope_json=json.dumps(config["scopes"], ensure_ascii=False),
+        expired_at=utcnow() + timedelta(minutes=15),
+    )
+    db.add(session_record)
+    db.flush()
+
+    auth_params = {
+        config.get("authorization_client_param", "client_id"): config["client_id"],
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": config["scope_separator"].join(config["scopes"]),
+        "state": state_token,
+    }
+    if platform == "youtube":
+        auth_params["access_type"] = "offline"
+        auth_params["include_granted_scopes"] = "true"
+        auth_params["prompt"] = "consent"
+    if platform in {"facebook", "instagram"}:
+        auth_params["auth_type"] = "rerequest"
+    if config.get("pkce_required"):
+        auth_params["code_challenge"] = build_code_challenge(code_verifier)
+        auth_params["code_challenge_method"] = "S256"
+
+    auth_url = build_query_url(config["auth_url"], auth_params)
+    create_audit_log(
+        db,
+        action="oauth_session_started",
+        target_type="oauth_session",
+        target_id=str(session_record.id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"platform": config["code"], "group_id": effective_group_id},
+    )
+    db.commit()
+    db.refresh(session_record)
+    return {
+        "ok": True,
+        "auth_url": auth_url,
+        "item": serialize_oauth_session(session_record),
+    }
+
+
+@app.get("/oauth/{platform}/callback")
+def oauth_callback(
+    platform: str,
+    request: Request,
+    code: str = Query(default=""),
+    state: str = Query(default=""),
+    error: str = Query(default=""),
+    error_description: str = Query(default=""),
+    db: Session = Depends(get_db),
+):
+    normalized_platform = str(platform or "").strip().lower()
+    try:
+        config = get_platform_config(normalized_platform)
+    except HTTPException as exc:
+        return RedirectResponse(
+            build_accounts_redirect_url(normalized_platform, "error", exc.detail),
+            status_code=302,
+        )
+
+    if not state:
+        return RedirectResponse(
+            build_accounts_redirect_url(normalized_platform, "error", "缺少 OAuth state"),
+            status_code=302,
+        )
+
+    session_record = None
+    try:
+        session_record = get_oauth_session_by_state_or_404(db, state)
+        if session_record.platform != config["code"]:
+            raise HTTPException(status_code=400, detail="OAuth 平台与会话不匹配")
+        if is_expired(session_record.expired_at):
+            session_record.status = "expired"
+            db.commit()
+            raise HTTPException(status_code=400, detail="OAuth 会话已过期，请重新发起连接")
+        if error:
+            message = error_description or error
+            session_record.status = "failed"
+            session_record.error_message = message
+            session_record.completed_at = utcnow()
+            db.commit()
+            raise HTTPException(status_code=400, detail=message)
+        if not code:
+            raise HTTPException(status_code=400, detail="OAuth 回调缺少 code")
+
+        actor_user = get_user_or_404(db, session_record.user_id)
+        token_data = exchange_oauth_code(
+            config["code"],
+            config,
+            code,
+            session_record.redirect_uri or build_oauth_callback_url(request, config["code"]),
+            session_record.code_verifier or "",
+        )
+        profile = fetch_platform_profile(config["code"], token_data["access_token"])
+        if not profile.get("platform_user_id"):
+            raise HTTPException(status_code=400, detail="已拿到令牌，但无法识别平台账号 ID")
+
+        existing = db.scalar(
+            select(PlatformAccount).where(
+                PlatformAccount.platform == config["code"],
+                PlatformAccount.platform_user_id == profile["platform_user_id"],
+            )
+        )
+        if existing and existing.group_id != session_record.group_id and existing.group_id is not None:
+            raise HTTPException(status_code=409, detail="该平台账号已绑定到其他账号组")
+
+        account_record = existing or PlatformAccount(
+            group_id=session_record.group_id,
+            platform=config["code"],
+            platform_user_id=profile["platform_user_id"],
+        )
+        if existing is None:
+            db.add(account_record)
+
+        account_record.group_id = session_record.group_id
+        account_record.account_name = profile["account_name"]
+        account_record.account_handle = profile["account_handle"]
+        account_record.profile_url = profile["profile_url"]
+        account_record.avatar_url = profile["avatar_url"]
+        account_record.auth_type = "oauth2"
+        account_record.status = "active"
+        account_record.connected_by_user_id = actor_user.id
+        account_record.access_token = token_data["access_token"]
+        account_record.refresh_token = token_data["refresh_token"]
+        account_record.token_type = token_data["token_type"]
+        account_record.token_expires_at = token_data["expires_at"]
+        account_record.scope_json = json.dumps(token_data["scopes"], ensure_ascii=False)
+        account_record.profile_json = json.dumps(profile["profile"], ensure_ascii=False)
+        account_record.last_synced_at = utcnow()
+
+        session_record.status = "completed"
+        session_record.error_message = ""
+        session_record.completed_at = utcnow()
+
+        create_audit_log(
+            db,
+            action="platform_account_connected",
+            target_type="platform_account",
+            target_id=f"{config['code']}:{profile['platform_user_id']}",
+            actor_type="user",
+            actor_code=actor_user.username,
+            actor_user_id=actor_user.id,
+            detail={"platform": config["code"], "group_id": session_record.group_id},
+        )
+        db.commit()
+        return RedirectResponse(
+            build_accounts_redirect_url(config["code"], "success", f"{config['label']} 账号已接入"),
+            status_code=302,
+        )
+    except HTTPException as exc:
+        if session_record is not None:
+            session_record.status = "failed"
+            session_record.error_message = str(exc.detail)
+            session_record.completed_at = utcnow()
+            db.commit()
+        return RedirectResponse(
+            build_accounts_redirect_url(normalized_platform, "error", str(exc.detail)),
+            status_code=302,
+        )
+    except Exception as exc:
+        if session_record is not None:
+            session_record.status = "failed"
+            session_record.error_message = str(exc)
+            session_record.completed_at = utcnow()
+            db.commit()
+        return RedirectResponse(
+            build_accounts_redirect_url(normalized_platform, "error", str(exc)),
+            status_code=302,
+        )
 
 
 @app.get("/users")
