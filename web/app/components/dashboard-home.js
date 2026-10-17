@@ -205,6 +205,12 @@ export default function DashboardHome() {
           meta={`当前待处理 ${taskSummary.pending || 0} 条，运行中 ${taskSummary.running || 0} 条`}
         />
         <EntryCard
+          href="/agent-flow"
+          title="AI文案工作流"
+          hint="单独处理选题、提示词优化、发布文案和可选视频提示词生成。"
+          meta="独立页面，和普通任务中心分开操作"
+        />
+        <EntryCard
           href="/workers"
           title="Worker 节点"
           hint="查看节点在线状态、心跳时间、当前任务，必要时手动登记测试节点。"

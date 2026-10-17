@@ -2256,6 +2256,7 @@ def create_task(
 @app.get("/tasks")
 def list_tasks(
     status: str = Query("", description="按状态过滤"),
+    task_type: str = Query("", description="按任务类型过滤"),
     group_id: Optional[int] = Query(default=None, description="按账号组过滤"),
     limit: int = Query(20, ge=1, le=100),
     authorization: Optional[str] = Header(default=None),
@@ -2270,51 +2271,72 @@ def list_tasks(
     )
     if status:
         statement = statement.where(TaskRecord.status == status)
+    if task_type:
+        statement = statement.where(TaskRecord.task_type == task_type)
     items = db.scalars(statement).all()
     return {"ok": True, "items": [serialize_task_record(item) for item in items]}
 
 
 @app.get("/tasks/summary")
 def tasks_summary(
+    task_type: str = Query("", description="按任务类型过滤"),
     group_id: Optional[int] = Query(default=None),
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
     actor_user = require_active_user(db, authorization)
     group_scope = resolve_group_scope(db, actor_user, group_id)
+    
+    def apply_task_type_filter(statement):
+        if task_type:
+            return statement.where(TaskRecord.task_type == task_type)
+        return statement
+
     total = db.scalar(
-        apply_group_scope(select(func.count()).select_from(TaskRecord), TaskRecord.group_id, group_scope)
+        apply_task_type_filter(
+            apply_group_scope(select(func.count()).select_from(TaskRecord), TaskRecord.group_id, group_scope)
+        )
     ) or 0
     pending = db.scalar(
-        apply_group_scope(
-            select(func.count()).select_from(TaskRecord).where(TaskRecord.status.in_(["pending", "queued"])),
-            TaskRecord.group_id,
-            group_scope,
+        apply_task_type_filter(
+            apply_group_scope(
+                select(func.count()).select_from(TaskRecord).where(TaskRecord.status.in_(["pending", "queued"])),
+                TaskRecord.group_id,
+                group_scope,
+            )
         )
     ) or 0
     running = db.scalar(
-        apply_group_scope(
-            select(func.count()).select_from(TaskRecord).where(TaskRecord.status == "running"),
-            TaskRecord.group_id,
-            group_scope,
+        apply_task_type_filter(
+            apply_group_scope(
+                select(func.count()).select_from(TaskRecord).where(TaskRecord.status == "running"),
+                TaskRecord.group_id,
+                group_scope,
+            )
         )
     ) or 0
     success = db.scalar(
-        apply_group_scope(
-            select(func.count()).select_from(TaskRecord).where(TaskRecord.status == "success"),
-            TaskRecord.group_id,
-            group_scope,
+        apply_task_type_filter(
+            apply_group_scope(
+                select(func.count()).select_from(TaskRecord).where(TaskRecord.status == "success"),
+                TaskRecord.group_id,
+                group_scope,
+            )
         )
     ) or 0
     failed = db.scalar(
-        apply_group_scope(
-            select(func.count()).select_from(TaskRecord).where(TaskRecord.status == "failed"),
-            TaskRecord.group_id,
-            group_scope,
+        apply_task_type_filter(
+            apply_group_scope(
+                select(func.count()).select_from(TaskRecord).where(TaskRecord.status == "failed"),
+                TaskRecord.group_id,
+                group_scope,
+            )
         )
     ) or 0
     latest = db.scalar(
-        apply_group_scope(select(TaskRecord).order_by(desc(TaskRecord.id)).limit(1), TaskRecord.group_id, group_scope)
+        apply_task_type_filter(
+            apply_group_scope(select(TaskRecord).order_by(desc(TaskRecord.id)).limit(1), TaskRecord.group_id, group_scope)
+        )
     )
     return {
         "ok": True,

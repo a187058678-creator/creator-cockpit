@@ -39,10 +39,12 @@ export const secondaryButtonStyle = {
 
 export const taskStatusOptions = ["pending", "queued", "running", "success", "failed", "cancelled"];
 export const authStorageKey = "creator-cockpit-access-token";
+export const publishDraftStorageKey = "creator-cockpit-publish-draft";
 
 const navItems = [
   { href: "/", label: "首页总览", hint: "只看状态和入口" },
   { href: "/tasks", label: "任务中心", hint: "创建、分配、重试" },
+  { href: "/agent-flow", label: "AI文案工作流", hint: "选题、提示词、文案" },
   { href: "/workers", label: "Worker 节点", hint: "节点在线、心跳、状态" },
   { href: "/files", label: "文件中心", hint: "R2 文件和数据库记录" },
   { href: "/access", label: "访问控制", hint: "用户、账号组、凭证、审计" },
@@ -68,6 +70,35 @@ export function getStoredAccessToken() {
     return "";
   }
   return window.localStorage.getItem(authStorageKey) || "";
+}
+
+export function getStoredPublishDraft() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const rawValue = window.localStorage.getItem(publishDraftStorageKey);
+  if (!rawValue) {
+    return null;
+  }
+  try {
+    return JSON.parse(rawValue);
+  } catch {
+    return null;
+  }
+}
+
+export function setStoredPublishDraft(draft) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.setItem(publishDraftStorageKey, JSON.stringify(draft));
+}
+
+export function clearStoredPublishDraft() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.removeItem(publishDraftStorageKey);
 }
 
 export function buildAuthHeaders(headers = {}) {

@@ -185,80 +185,6 @@ function buildTaskFormPreset({ title, sourceValue, profile = "balanced" }) {
   };
 }
 
-function buildAgentFlowPayload() {
-  return {
-    schema_version: "creator-task/v1",
-    source: {
-      asset_key: "",
-      start_seconds: 0,
-      end_seconds: 0,
-    },
-    publish: {
-      platforms: ["tiktok"],
-      need_subtitles: false,
-    },
-    output: {
-      prefix: "agent-flow",
-      target_height: 720,
-      video_codec: "libx264",
-      audio_codec: "aac",
-    },
-    execution: {
-      max_retries: 1,
-      simulate_fail: false,
-      required_capabilities: ["llm-agent"],
-      preferred_worker_codes: [],
-      lease_timeout_seconds: 1800,
-    },
-    agent_flow: {
-      goal: "选题/提示词优化/发布文案生成",
-      topic_seed: "围绕AI短视频批量起号，生成可连续扩写的内容方向",
-      platform: "tiktok",
-      audience: "想做AI视频副业的新手创作者",
-      tone: "高点击、强反差、适合短视频口播",
-      language: "zh-CN",
-      reference_prompt: "",
-      reference_copy: "",
-      deepseek: {
-        enabled: true,
-        model: "deepseek-chat",
-        temperature: 0.8,
-        max_topics: 5,
-      },
-      video: {
-        enabled: false,
-        provider: "agnes",
-        model: "agnes-video-2.5-flash",
-        seconds: "5",
-        size: "1280x720",
-        poll_timeout_seconds: 120,
-        poll_interval_seconds: 10,
-      },
-    },
-    dedupe: {
-      enabled: false,
-      profile: "balanced",
-      seed: 0,
-      randomize: true,
-    },
-  };
-}
-
-function buildAgentFlowFormPreset() {
-  return {
-    title: "AI智能体-选题提示词文案生成",
-    task_type: "agent_flow",
-    source_type: "manual",
-    source_value: "账号定位：AI短视频批量起号；目标：先生成可直接投喂视频模型和发布中心的文案骨架",
-    priority: "high",
-    group_id: "",
-    required_capabilities: "llm-agent",
-    preferred_worker_codes: "",
-    lease_timeout_seconds: "1800",
-    payload: JSON.stringify(buildAgentFlowPayload(), null, 2),
-  };
-}
-
 const quickTaskPresets = [
   {
     key: "youtube_real_balanced",
@@ -279,12 +205,6 @@ const quickTaskPresets = [
       sourceValue: "https://www.youtube.com/shorts/QfZnSS1hgy0",
       profile: "aggressive",
     }),
-  },
-  {
-    key: "agent_flow_copy",
-    label: "AI文案工作流",
-    hint: "生成选题、视频提示词和发布文案，默认不触发视频生成，适合先自己验证。",
-    form: buildAgentFlowFormPreset(),
   },
 ];
 
@@ -787,7 +707,18 @@ export default function TasksPageClient() {
           </div>
         </Section>
 
-        <Section title="创建任务" hint="先把任务排进去，再交给 Worker 领取执行。">
+        <Section
+          title="创建任务"
+          hint="先把任务排进去，再交给 Worker 领取执行。AI 文案工作流已拆到独立页面。"
+          action={
+            <a
+              href="/agent-flow"
+              style={{ ...secondaryButtonStyle, textDecoration: "none", display: "inline-flex", alignItems: "center" }}
+            >
+              打开 AI 文案工作流
+            </a>
+          }
+        >
           <form onSubmit={createTask} style={{ display: "grid", gap: 12 }}>
             <div style={{ display: "grid", gap: 10 }}>
               <div style={{ fontSize: 13, fontWeight: 600, color: "#cbd5e1" }}>快捷预设</div>
