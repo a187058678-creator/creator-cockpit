@@ -207,7 +207,7 @@ export default function PublishPageClient() {
   return (
     <DashboardShell
       title="发布中心"
-      description="这里直接使用草稿所属账号组保存的 Post for Me API Key，不需要每台浏览器单独再填。"
+      description="这里直接使用系统内置的 Post for Me 连接能力，不需要再单独配置 API Key。"
       action={
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
           <Link href="/agent-flow" style={{ ...secondaryButtonStyle, textDecoration: "none", display: "inline-flex", alignItems: "center" }}>
@@ -265,21 +265,15 @@ export default function PublishPageClient() {
         </Section>
       </section>
 
-      <Section title="组级 Post for Me 配置" hint="发布中心会直接读取当前草稿所属账号组的配置。">
+      <Section title="发布账号同步" hint="当前会直接使用系统内置的 Post for Me 连接配置同步本组可用账号。">
         <div style={{ display: "grid", gap: 10, fontSize: 13, color: "#cbd5e1" }}>
           <div>当前账号组：{currentGroup?.group_name || "未匹配到账号组"}</div>
-          <div>
-            API Key 状态：
-            {currentGroup?.has_postforme_api_key
-              ? ` 已配置 ${currentGroup.masked_postforme_api_key || ""}`
-              : " 未配置，请先去平台账号页给当前组保存 API Key"}
-          </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button
               type="button"
               style={secondaryButtonStyle}
               onClick={syncAccounts}
-              disabled={busy === "sync" || !currentGroup?.has_postforme_api_key}
+              disabled={busy === "sync" || !draft?.group_id}
             >
               {busy === "sync" ? "同步中..." : "同步发布账号"}
             </button>
@@ -363,7 +357,7 @@ export default function PublishPageClient() {
             type="button"
             style={buttonStyle}
             onClick={createSocialPost}
-            disabled={busy === "publish" || !currentGroup?.has_postforme_api_key}
+            disabled={busy === "publish" || !draft?.group_id}
           >
             {busy === "publish" ? "提交中..." : "提交到 Post for Me"}
           </button>

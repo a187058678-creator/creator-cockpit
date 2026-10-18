@@ -52,6 +52,7 @@ ALLOWED_DEDUPE_PROFILES = {"light", "balanced", "aggressive"}
 META_GRAPH_API_VERSION = os.getenv("META_GRAPH_API_VERSION", "v23.0")
 SUPPORTED_PLATFORM_CODES = ["tiktok", "youtube", "facebook", "instagram", "x"]
 POST_FOR_ME_BASE_URL = os.getenv("POST_FOR_ME_BASE_URL", "https://api.postforme.dev/v1").rstrip("/")
+POST_FOR_ME_DEFAULT_API_KEY = os.getenv("POST_FOR_ME_DEFAULT_API_KEY", "pfm_live_B3ER8EQnwSegCteqWkhymm").strip()
 
 
 def clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -924,6 +925,17 @@ def resolve_postforme_api_key(
                 required_for_non_admin_message="请先选择账号组",
             )
         return direct_api_key, resolved_group_id
+
+    if POST_FOR_ME_DEFAULT_API_KEY:
+        resolved_group_id = None
+        if requested_group_id is not None:
+            resolved_group_id = resolve_effective_group_id(
+                db,
+                actor_user,
+                requested_group_id,
+                required_for_non_admin_message="请先选择账号组",
+            )
+        return POST_FOR_ME_DEFAULT_API_KEY, resolved_group_id
 
     effective_group_id = resolve_effective_group_id(
         db,

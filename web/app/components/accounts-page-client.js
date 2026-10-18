@@ -36,27 +36,19 @@ const platformLabels = {
 export default function AccountsPageClient() {
   const [groups, setGroups] = useState([]);
   const [accounts, setAccounts] = useState([]);
-  const [currentUser, setCurrentUser] = useState(null);
   const [groupFilter, setGroupFilter] = useState("");
   const [platformFilter, setPlatformFilter] = useState("");
-  const [apiKeyInput, setApiKeyInput] = useState("");
   const [busy, setBusy] = useState("");
-  const [message, setMessage] = useState("先选择账号组并保存组级 Post for Me API Key，再开始绑定远程账号。");
+  const [message, setMessage] = useState("先选择账号组，再开始绑定和同步远程账号。");
 
   const currentGroup = useMemo(
     () => groups.find((item) => String(item.id) === String(groupFilter)) || null,
     [groups, groupFilter]
   );
-  const canManageGroupApiKey = currentUser?.role === "admin";
 
   async function loadGroups() {
     const data = await readJson(await authFetch("/api/groups", { cache: "no-store" }));
     return data.items || [];
-  }
-
-  async function loadCurrentUser() {
-    const data = await readJson(await authFetch("/api/auth/me", { cache: "no-store" }));
-    setCurrentUser(data.item?.user || null);
   }
 
   async function loadAccounts(nextGroupId = groupFilter, nextPlatform = platformFilter) {
@@ -76,7 +68,7 @@ export default function AccountsPageClient() {
   async function reloadAll(nextGroupId = groupFilter, nextPlatform = platformFilter) {
     setMessage("正在刷新 Post for Me 账号...");
     try {
-      const [nextGroups] = await Promise.all([loadGroups(), loadCurrentUser()]);
+      const nextGroups = await loadGroups();
       setGroups(nextGroups);
       let effectiveGroupId = nextGroupId;
       if (!effectiveGroupId && nextGroups.length === 1) {
@@ -94,10 +86,6 @@ export default function AccountsPageClient() {
     reloadAll("", "");
   }, []);
 
-  useEffect(() => {
-    setApiKeyInput("");
-  }, [groupFilter]);
-
   const summaryCards = useMemo(() => {
     const activeAccounts = accounts.filter((item) => item.status === "active").length;
     const groupedAccounts = accounts.filter((item) => item.group_id).length;
@@ -109,35 +97,6 @@ export default function AccountsPageClient() {
       { label: "覆盖平台", value: String(connectedPlatforms.size), hint: "当前已同步的平台数", ok: connectedPlatforms.size > 0 },
     ];
   }, [accounts]);
-
-  async function saveGroupApiKey(nextValue) {
-    if (!canManageGroupApiKey) {
-      setMessage("只有管理员可以修改组级 Post for Me API Key");
-      return;
-    }
-    if (!groupFilter) {
-      setMessage("请先选择账号组");
-      return;
-    }
-    setBusy("save-group-key");
-    setMessage("正在保存组级 Post for Me API Key...");
-    try {
-      await readJson(
-        await authFetch(`/api/groups/${groupFilter}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ postforme_api_key: nextValue }),
-        })
-      );
-      await reloadAll(groupFilter, platformFilter);
-      setApiKeyInput("");
-      setMessage(nextValue ? "组级 Post for Me API Key 已保存" : "组级 Post for Me API Key 已清空");
-    } catch (error) {
-      setMessage(error.message || "保存组级 API Key 失败");
-    } finally {
-      setBusy("");
-    }
-  }
 
   async function syncAccounts() {
     if (!groupFilter) {
@@ -245,7 +204,7 @@ export default function AccountsPageClient() {
   return (
     <DashboardShell
       title="平台账号"
-      description="这里按账号组保存 Post for Me API Key，团队成员选中同一个组后就能共用绑定和发帖能力。"
+      description="这里直接使用系统内置的 Post for Me 连接能力，团队成员选中同一个组后就能共用绑定和发帖能力。"
       action={
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
           <select
@@ -298,44 +257,8 @@ export default function AccountsPageClient() {
         ))}
       </section>
 
-      <Section title="当前消息" hint="最近一次组级配置保存、授权发起、同步或状态更新结果。">
+      <Section title="当前消息" hint="最近一次授权发起、同步或状态更新结果。">
         <div style={{ fontSize: 14, color: "#e2e8f0", wordBreak: "break-word" }}>{message}</div>
-      </Section>
-
-      <Section title="组级 Post for Me API Key" hint="API Key 保存到后端账号组配置里，团队成员不需要各自再填一次。">
-        <div style={{ display: "grid", gap: 12 }}>
-          <div style={{ fontSize: 13, color: "#94a3b8" }}>
-            当前账号组：{currentGroup?.group_name || "未选择"}{currentGroup?.has_postforme_api_key ? ` | 已配置 ${currentGroup.masked_postforme_api_key || ""}` : " | 未配置"}
-          </div>
-          <div style={{ fontSize: 13, color: canManageGroupApiKey ? "#94a3b8" : "#fbbf24" }}>
-            当前角色：{currentUser?.role || "未登录"}{canManageGroupApiKey ? "，可修改当前组 API Key" : "，当前区块只读，仅管理员可修改"}
-          </div>
-          <input
-            style={inputStyle}
-            value={apiKeyInput}
-            onChange={(event) => setApiKeyInput(event.target.value)}
-            placeholder="输入新的 Post for Me API Key；留空可点击清空"
-            disabled={!canManageGroupApiKey}
-          />
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button
-              type="button"
-              style={buttonStyle}
-              onClick={() => saveGroupApiKey(apiKeyInput)}
-              disabled={busy === "save-group-key" || !canManageGroupApiKey}
-            >
-              {busy === "save-group-key" ? "保存中..." : "保存到当前组"}
-            </button>
-            <button
-              type="button"
-              style={secondaryButtonStyle}
-              onClick={() => saveGroupApiKey("")}
-              disabled={busy === "save-group-key" || !currentGroup?.has_postforme_api_key || !canManageGroupApiKey}
-            >
-              清空当前组 API Key
-            </button>
-          </div>
-        </div>
       </Section>
 
       <Section title="绑定远程账号" hint="点平台按钮会打开 Post for Me 授权页；授权完成后回到这里，再点“同步远程账号”。">
@@ -360,12 +283,12 @@ export default function AccountsPageClient() {
             >
               <div style={{ fontSize: 16, fontWeight: 700 }}>{label}</div>
               <div style={{ fontSize: 12, color: "#94a3b8", lineHeight: 1.6 }}>
-                绑定会使用当前账号组保存的 Post for Me API Key。
+                绑定会直接使用系统内置的 Post for Me 连接配置。
               </div>
               <button
                 type="button"
                 style={buttonStyle}
-                disabled={busy === `connect-${platform}` || !currentGroup?.has_postforme_api_key}
+                disabled={busy === `connect-${platform}` || !currentGroup}
                 onClick={() => startConnect(platform)}
               >
                 {busy === `connect-${platform}` ? "打开中..." : `绑定 ${label}`}
