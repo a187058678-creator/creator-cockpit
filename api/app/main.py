@@ -53,6 +53,7 @@ META_GRAPH_API_VERSION = os.getenv("META_GRAPH_API_VERSION", "v23.0")
 SUPPORTED_PLATFORM_CODES = ["tiktok", "youtube", "facebook", "instagram", "x"]
 POST_FOR_ME_BASE_URL = os.getenv("POST_FOR_ME_BASE_URL", "https://api.postforme.dev/v1").rstrip("/")
 POST_FOR_ME_DEFAULT_API_KEY = os.getenv("POST_FOR_ME_DEFAULT_API_KEY", "pfm_live_B3ER8EQnwSegCteqWkhymm").strip()
+PUBLIC_BUSINESS_API_MODE = str(os.getenv("PUBLIC_BUSINESS_API_MODE", "1")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -1851,9 +1852,38 @@ def get_active_user_session_or_401(db: Session, authorization: Optional[str]) ->
     return session_record, user_record
 
 
-def require_active_user(db: Session, authorization: Optional[str]) -> UserAccount:
+def get_public_business_actor_or_503(db: Session) -> UserAccount:
+    admin_user = db.scalar(
+        select(UserAccount)
+        .where(UserAccount.status == "active", UserAccount.role == "admin")
+        .order_by(UserAccount.id)
+        .limit(1)
+    )
+    if admin_user:
+        return admin_user
+    fallback_user = db.scalar(
+        select(UserAccount)
+        .where(UserAccount.status == "active")
+        .order_by(UserAccount.id)
+        .limit(1)
+    )
+    if fallback_user:
+        return fallback_user
+    raise HTTPException(status_code=503, detail="当前没有可用的活动用户，无法进入公共测试模式")
+
+
+def require_strict_active_user(db: Session, authorization: Optional[str]) -> UserAccount:
     _, user_record = get_active_user_session_or_401(db, authorization)
     return user_record
+
+
+def require_active_user(db: Session, authorization: Optional[str]) -> UserAccount:
+    access_token = extract_access_token(authorization)
+    if access_token:
+        return require_strict_active_user(db, authorization)
+    if PUBLIC_BUSINESS_API_MODE:
+        return get_public_business_actor_or_503(db)
+    return require_strict_active_user(db, authorization)
 
 
 def should_allow_user_bootstrap(db: Session) -> bool:
@@ -2517,7 +2547,7 @@ def list_users(
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    require_active_user(db, authorization)
+    require_strict_active_user(db, authorization)
     items = db.scalars(select(UserAccount).order_by(desc(UserAccount.id)).limit(limit)).all()
     return {"ok": True, "items": [serialize_user_account(item) for item in items]}
 
@@ -2528,7 +2558,7 @@ def create_user(
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    actor_user = require_active_user(db, authorization) if not should_allow_user_bootstrap(db) else None
+    actor_user = require_strict_active_user(db, authorization) if not should_allow_user_bootstrap(db) else None
     username = payload.username.strip().lower()
     if not username:
         raise HTTPException(status_code=400, detail="用户名不能为空")
@@ -2566,7 +2596,7 @@ def update_user(
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    actor_user = require_active_user(db, authorization)
+    actor_user = require_strict_active_user(db, authorization)
     record = get_user_or_404(db, user_id)
     if payload.display_name is not None:
         record.display_name = payload.display_name.strip() or record.display_name
@@ -2610,7 +2640,7 @@ def create_group(
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    actor_user = require_active_user(db, authorization)
+    actor_user = require_strict_active_user(db, authorization)
     group_name = payload.group_name.strip()
     if not group_name:
         raise HTTPException(status_code=400, detail="账号组名称不能为空")
@@ -2665,7 +2695,7 @@ def update_group(
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    actor_user = require_active_user(db, authorization)
+    actor_user = require_strict_active_user(db, authorization)
     record = get_group_or_404(db, group_id)
     if payload.group_name is not None:
         record.group_name = payload.group_name.strip() or record.group_name
@@ -2702,7 +2732,7 @@ def list_group_members(
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    actor_user = require_active_user(db, authorization)
+    actor_user = require_strict_active_user(db, authorization)
     resolve_group_scope(db, actor_user, group_id)
     get_group_or_404(db, group_id)
     items = db.scalars(
@@ -2729,7 +2759,7 @@ def create_group_member(
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    actor_user = require_active_user(db, authorization)
+    actor_user = require_strict_active_user(db, authorization)
     resolve_group_scope(db, actor_user, group_id)
     get_group_or_404(db, group_id)
     user = get_user_or_404(db, payload.user_id)
@@ -2770,7 +2800,7 @@ def update_group_member(
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    actor_user = require_active_user(db, authorization)
+    actor_user = require_strict_active_user(db, authorization)
     resolve_group_scope(db, actor_user, group_id)
     record = get_group_member_or_404(db, group_id, member_id)
     record.member_role = payload.member_role.strip() or record.member_role
@@ -2797,7 +2827,7 @@ def list_worker_tokens(
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    actor_user = require_active_user(db, authorization)
+    actor_user = require_strict_active_user(db, authorization)
     statement = select(WorkerToken).order_by(desc(WorkerToken.id)).limit(limit)
     statement = apply_group_scope(
         statement,
@@ -2814,7 +2844,7 @@ def create_worker_token(
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    actor_user = require_active_user(db, authorization)
+    actor_user = require_strict_active_user(db, authorization)
     worker_code = payload.worker_code.strip()
     if not worker_code:
         raise HTTPException(status_code=400, detail="Worker Code 不能为空")
@@ -2862,7 +2892,7 @@ def revoke_worker_token(
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    actor_user = require_active_user(db, authorization)
+    actor_user = require_strict_active_user(db, authorization)
     record = get_worker_token_or_404(db, token_id)
     if record.group_id is None and not is_admin_user(actor_user):
         raise HTTPException(status_code=403, detail="当前用户无权操作未归组的 Worker Token")
@@ -2889,7 +2919,7 @@ def list_audit_logs(
     authorization: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    require_active_user(db, authorization)
+    require_strict_active_user(db, authorization)
     items = db.scalars(select(AuditLog).order_by(desc(AuditLog.id)).limit(limit)).all()
     return {"ok": True, "items": [serialize_audit_log(item) for item in items]}
 
