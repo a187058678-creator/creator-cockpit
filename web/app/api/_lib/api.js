@@ -10,9 +10,15 @@ export function getApiBaseUrl() {
 
 export function withAuthHeaders(request, headers = {}) {
   const authorization = request?.headers?.get("authorization");
-  return authorization
-    ? { ...headers, Authorization: authorization }
-    : headers;
+  const postForMeApiKey = request?.headers?.get("x-postforme-api-key");
+  const nextHeaders = { ...headers };
+  if (authorization) {
+    nextHeaders.Authorization = authorization;
+  }
+  if (postForMeApiKey) {
+    nextHeaders["x-postforme-api-key"] = postForMeApiKey;
+  }
+  return nextHeaders;
 }
 
 export async function proxyJson(url, init = {}, request) {

@@ -9,6 +9,7 @@ export async function GET(request) {
     const groupId = searchParams.get("group_id") || "";
     const platform = searchParams.get("platform") || "";
     const status = searchParams.get("status") || "";
+    const authType = searchParams.get("auth_type") || "";
     const limit = searchParams.get("limit") || "50";
     if (groupId) {
       query.set("group_id", groupId);
@@ -18,6 +19,9 @@ export async function GET(request) {
     }
     if (status) {
       query.set("status", status);
+    }
+    if (authType) {
+      query.set("auth_type", authType);
     }
     query.set("limit", limit);
     return await proxyJson(`${getApiBaseUrl()}/platform-accounts?${query.toString()}`, { cache: "no-store" }, request);

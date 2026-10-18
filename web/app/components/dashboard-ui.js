@@ -40,13 +40,14 @@ export const secondaryButtonStyle = {
 export const taskStatusOptions = ["pending", "queued", "running", "success", "failed", "cancelled"];
 export const authStorageKey = "creator-cockpit-access-token";
 export const publishDraftStorageKey = "creator-cockpit-publish-draft";
+export const postForMeApiKeyStorageKey = "creator-cockpit-postforme-api-key";
 
 const navItems = [
   { href: "/", label: "首页总览", hint: "只看状态和入口" },
   { href: "/tasks", label: "任务中心", hint: "创建、分配、重试" },
   { href: "/agent-flow", label: "AI文案工作流", hint: "选题、提示词、文案" },
   { href: "/publish", label: "发布中心", hint: "承接草稿、继续发布" },
-  { href: "/accounts", label: "平台账号", hint: "OAuth、账号绑定、归组" },
+  { href: "/accounts", label: "平台账号", hint: "Post for Me 绑定、归组" },
   { href: "/workers", label: "Worker 节点", hint: "节点在线、心跳、状态" },
   { href: "/files", label: "文件中心", hint: "R2 文件和数据库记录" },
   { href: "/access", label: "访问控制", hint: "用户、账号组、凭证、审计" },
@@ -101,6 +102,32 @@ export function clearStoredPublishDraft() {
     return;
   }
   window.localStorage.removeItem(publishDraftStorageKey);
+}
+
+export function getStoredPostForMeApiKey() {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  return window.localStorage.getItem(postForMeApiKeyStorageKey) || "";
+}
+
+export function setStoredPostForMeApiKey(value) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  const trimmedValue = String(value || "").trim();
+  if (!trimmedValue) {
+    window.localStorage.removeItem(postForMeApiKeyStorageKey);
+    return;
+  }
+  window.localStorage.setItem(postForMeApiKeyStorageKey, trimmedValue);
+}
+
+export function clearStoredPostForMeApiKey() {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.localStorage.removeItem(postForMeApiKeyStorageKey);
 }
 
 export function buildAuthHeaders(headers = {}) {

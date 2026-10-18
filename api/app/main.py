@@ -51,6 +51,7 @@ TASK_PAYLOAD_SCHEMA_VERSION = "creator-task/v1"
 ALLOWED_DEDUPE_PROFILES = {"light", "balanced", "aggressive"}
 META_GRAPH_API_VERSION = os.getenv("META_GRAPH_API_VERSION", "v23.0")
 SUPPORTED_PLATFORM_CODES = ["tiktok", "youtube", "facebook", "instagram", "x"]
+POST_FOR_ME_BASE_URL = os.getenv("POST_FOR_ME_BASE_URL", "https://api.postforme.dev/v1").rstrip("/")
 
 
 def clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -521,6 +522,7 @@ class CreateGroupRequest(BaseModel):
     owner_user_id: Optional[int] = None
     status: str = "active"
     remark: str = ""
+    postforme_api_key: str = ""
 
 
 class UpdateGroupRequest(BaseModel):
@@ -528,6 +530,7 @@ class UpdateGroupRequest(BaseModel):
     owner_user_id: Optional[int] = None
     status: Optional[str] = None
     remark: Optional[str] = None
+    postforme_api_key: Optional[str] = None
 
 
 class CreateGroupMemberRequest(BaseModel):
@@ -571,6 +574,24 @@ class UpdatePlatformAccountRequest(BaseModel):
     account_name: Optional[str] = None
     account_handle: Optional[str] = None
     status: Optional[str] = None
+
+
+class PostForMeAuthUrlRequest(BaseModel):
+    platform: str
+    group_id: Optional[int] = None
+
+
+class PostForMeSyncAccountsRequest(BaseModel):
+    platforms: list[str] = Field(default_factory=list)
+    group_id: Optional[int] = None
+
+
+class PostForMeCreatePostRequest(BaseModel):
+    social_account_ids: list[str] = Field(default_factory=list)
+    caption: str = ""
+    media_urls: list[str] = Field(default_factory=list)
+    scheduled_at: Optional[str] = None
+    group_id: Optional[int] = None
 
 
 def get_required_env(name: str) -> str:
@@ -876,6 +897,178 @@ def build_query_url(url: str, params: Optional[dict[str, Any]] = None) -> str:
         return url
     query_string = urllib_parse.urlencode(params, doseq=True)
     return f"{url}{'&' if '?' in url else '?'}{query_string}"
+
+
+def get_postforme_api_key(raw_value: Optional[str]) -> str:
+    api_key = str(raw_value or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="缺少 Post for Me API Key")
+    return api_key
+
+
+def resolve_postforme_api_key(
+    db: Session,
+    *,
+    actor_user: UserAccount,
+    requested_group_id: Optional[int],
+    header_api_key: Optional[str],
+) -> tuple[str, Optional[int]]:
+    direct_api_key = str(header_api_key or "").strip()
+    if direct_api_key:
+        resolved_group_id = None
+        if requested_group_id is not None:
+            resolved_group_id = resolve_effective_group_id(
+                db,
+                actor_user,
+                requested_group_id,
+                required_for_non_admin_message="请先选择账号组",
+            )
+        return direct_api_key, resolved_group_id
+
+    effective_group_id = resolve_effective_group_id(
+        db,
+        actor_user,
+        requested_group_id,
+        required_for_non_admin_message="请先选择已配置 Post for Me API Key 的账号组",
+    )
+    if effective_group_id is None:
+        raise HTTPException(status_code=400, detail="请先选择账号组并配置组级 Post for Me API Key")
+    group_record = get_group_or_404(db, effective_group_id)
+    api_key = str(group_record.postforme_api_key or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="当前账号组还没有配置 Post for Me API Key")
+    return api_key, effective_group_id
+
+
+def parse_datetime_string(value: Optional[str]) -> Optional[datetime]:
+    raw_value = str(value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        return datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def postforme_request_json(
+    method: str,
+    path: str,
+    api_key: str,
+    *,
+    query_params: Optional[dict[str, Any]] = None,
+    json_body: Optional[dict[str, Any]] = None,
+) -> dict:
+    url = build_query_url(f"{POST_FOR_ME_BASE_URL}/{path.lstrip('/')}", query_params)
+    return make_http_request_json(
+        method,
+        url,
+        headers={"Authorization": f"Bearer {api_key}"},
+        json_body=json_body,
+    )
+
+
+def extract_avatar_url(profile: dict) -> str:
+    return str(
+        profile.get("avatar_url")
+        or profile.get("profile_image_url")
+        or profile.get("profile_picture_url")
+        or profile.get("image_url")
+        or ""
+    )
+
+
+def normalize_postforme_social_account(item: dict) -> dict:
+    profile = item if isinstance(item, dict) else {}
+    platform = str(profile.get("platform") or "").strip().lower()
+    account_id = str(profile.get("id") or "").strip()
+    username = str(profile.get("username") or profile.get("handle") or "").strip()
+    name = str(
+        profile.get("display_name")
+        or profile.get("account_name")
+        or profile.get("name")
+        or username
+        or account_id
+    ).strip()
+    account_handle = str(profile.get("account_handle") or username or "").strip()
+    if account_handle and not account_handle.startswith("@"):
+        account_handle = f"@{account_handle}"
+    return {
+        "platform": platform or "unknown",
+        "platform_user_id": account_id,
+        "account_name": name or "未命名账号",
+        "account_handle": account_handle,
+        "profile_url": str(profile.get("profile_url") or profile.get("url") or ""),
+        "avatar_url": extract_avatar_url(profile),
+        "status": str(profile.get("status") or "active").strip().lower(),
+        "token_expires_at": parse_datetime_string(
+            profile.get("token_expires_at")
+            or profile.get("access_token_expires_at")
+            or profile.get("expires_at")
+        ),
+        "profile": profile,
+    }
+
+
+def sync_postforme_social_accounts(
+    db: Session,
+    *,
+    actor_user: UserAccount,
+    api_key: str,
+    platforms: list[str],
+    group_id: Optional[int],
+) -> list[PlatformAccount]:
+    query_params: dict[str, Any] = {}
+    normalized_platforms = [item for item in ensure_str_list(platforms) if item in SUPPORTED_PLATFORM_CODES]
+    if normalized_platforms:
+        query_params["platform"] = normalized_platforms
+    remote_response = postforme_request_json("GET", "/social-accounts", api_key, query_params=query_params)
+    remote_items = remote_response.get("data") if isinstance(remote_response.get("data"), list) else []
+
+    resolved_group_id = None
+    if group_id is not None:
+        resolved_group_id = resolve_effective_group_id(
+            db,
+            actor_user,
+            group_id,
+            required_for_non_admin_message="请先选择要同步到哪个账号组",
+        )
+
+    synced_records: list[PlatformAccount] = []
+    for item in remote_items:
+        normalized = normalize_postforme_social_account(item)
+        if not normalized["platform_user_id"]:
+            continue
+        existing = db.scalar(
+            select(PlatformAccount).where(
+                PlatformAccount.auth_type == "postforme",
+                PlatformAccount.platform == normalized["platform"],
+                PlatformAccount.platform_user_id == normalized["platform_user_id"],
+            )
+        )
+        record = existing or PlatformAccount(
+            platform=normalized["platform"],
+            platform_user_id=normalized["platform_user_id"],
+            auth_type="postforme",
+        )
+        if existing is None:
+            db.add(record)
+        if record.group_id is None and resolved_group_id is not None:
+            record.group_id = resolved_group_id
+        record.account_name = normalized["account_name"]
+        record.account_handle = normalized["account_handle"]
+        record.profile_url = normalized["profile_url"]
+        record.avatar_url = normalized["avatar_url"]
+        record.status = normalized["status"] or record.status or "active"
+        record.connected_by_user_id = actor_user.id
+        record.token_type = "Bearer"
+        record.access_token = ""
+        record.refresh_token = ""
+        record.token_expires_at = normalized["token_expires_at"]
+        record.scope_json = json.dumps([], ensure_ascii=False)
+        record.profile_json = json.dumps(normalized["profile"], ensure_ascii=False)
+        record.last_synced_at = utcnow()
+        synced_records.append(record)
+    return synced_records
 
 
 def get_oauth_provider_cards() -> list[dict]:
@@ -1343,6 +1536,10 @@ def serialize_user_account(record: UserAccount):
 
 
 def serialize_account_group(record: AccountGroup):
+    masked_postforme_api_key = ""
+    if record.postforme_api_key:
+        suffix = record.postforme_api_key[-4:] if len(record.postforme_api_key) >= 4 else record.postforme_api_key
+        masked_postforme_api_key = f"***{suffix}"
     return {
         "id": record.id,
         "group_name": record.group_name,
@@ -1350,6 +1547,8 @@ def serialize_account_group(record: AccountGroup):
         "owner_user_id": record.owner_user_id,
         "status": record.status,
         "remark": record.remark,
+        "has_postforme_api_key": bool(record.postforme_api_key),
+        "masked_postforme_api_key": masked_postforme_api_key,
         "created_at": parse_datetime(record.created_at),
         "updated_at": parse_datetime(record.updated_at),
     }
@@ -1907,6 +2106,7 @@ def list_oauth_sessions(
 def list_platform_accounts(
     platform: str = Query("", description="按平台过滤"),
     status: str = Query("", description="按状态过滤"),
+    auth_type: str = Query("", description="按接入方式过滤"),
     group_id: Optional[int] = Query(default=None),
     limit: int = Query(50, ge=1, le=200),
     authorization: Optional[str] = Header(default=None),
@@ -1919,6 +2119,8 @@ def list_platform_accounts(
         statement = statement.where(PlatformAccount.platform == platform.strip().lower())
     if status:
         statement = statement.where(PlatformAccount.status == status.strip().lower())
+    if auth_type:
+        statement = statement.where(PlatformAccount.auth_type == auth_type.strip().lower())
     items = db.scalars(statement).all()
     return {"ok": True, "items": [serialize_platform_account(item) for item in items]}
 
@@ -1957,6 +2159,141 @@ def update_platform_account(
     db.commit()
     db.refresh(record)
     return {"ok": True, "item": serialize_platform_account(record)}
+
+
+@app.post("/postforme/social-accounts/auth-url")
+def create_postforme_social_account_auth_url(
+    payload: PostForMeAuthUrlRequest,
+    authorization: Optional[str] = Header(default=None),
+    x_postforme_api_key: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    api_key, effective_group_id = resolve_postforme_api_key(
+        db,
+        actor_user=actor_user,
+        requested_group_id=payload.group_id,
+        header_api_key=x_postforme_api_key,
+    )
+    platform = str(payload.platform or "").strip().lower()
+    if platform not in SUPPORTED_PLATFORM_CODES:
+        raise HTTPException(status_code=400, detail="当前平台暂不支持通过 Post for Me 绑定")
+    response = postforme_request_json(
+        "POST",
+        "/social-accounts/auth-url",
+        api_key,
+        json_body={"platform": platform},
+    )
+    auth_url = str(response.get("url") or response.get("data", {}).get("url") or "").strip()
+    if not auth_url:
+        raise HTTPException(status_code=400, detail="Post for Me 没有返回授权地址")
+    create_audit_log(
+        db,
+        action="postforme_auth_url_created",
+        target_type="platform_account",
+        target_id=platform,
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"platform": platform, "group_id": effective_group_id},
+    )
+    db.commit()
+    return {"ok": True, "platform": platform, "auth_url": auth_url}
+
+
+@app.post("/postforme/social-accounts/sync")
+def sync_postforme_accounts_endpoint(
+    payload: PostForMeSyncAccountsRequest,
+    authorization: Optional[str] = Header(default=None),
+    x_postforme_api_key: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    api_key, effective_group_id = resolve_postforme_api_key(
+        db,
+        actor_user=actor_user,
+        requested_group_id=payload.group_id,
+        header_api_key=x_postforme_api_key,
+    )
+    records = sync_postforme_social_accounts(
+        db,
+        actor_user=actor_user,
+        api_key=api_key,
+        platforms=payload.platforms,
+        group_id=effective_group_id,
+    )
+    create_audit_log(
+        db,
+        action="postforme_accounts_synced",
+        target_type="platform_account",
+        target_id=str(len(records)),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"platforms": ensure_str_list(payload.platforms), "group_id": effective_group_id, "count": len(records)},
+    )
+    db.commit()
+    return {"ok": True, "items": [serialize_platform_account(item) for item in records]}
+
+
+@app.post("/postforme/social-posts")
+def create_postforme_social_post(
+    payload: PostForMeCreatePostRequest,
+    authorization: Optional[str] = Header(default=None),
+    x_postforme_api_key: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    api_key, effective_group_id = resolve_postforme_api_key(
+        db,
+        actor_user=actor_user,
+        requested_group_id=payload.group_id,
+        header_api_key=x_postforme_api_key,
+    )
+    social_account_ids = [str(item).strip() for item in payload.social_account_ids if str(item).strip()]
+    if not social_account_ids:
+        raise HTTPException(status_code=400, detail="请至少选择一个发布账号")
+
+    local_accounts = db.scalars(
+        select(PlatformAccount).where(
+            PlatformAccount.auth_type == "postforme",
+            PlatformAccount.platform_user_id.in_(social_account_ids),
+        )
+    ).all()
+    for account in local_accounts:
+        if account.group_id is not None:
+            resolve_group_scope(db, actor_user, account.group_id)
+        if effective_group_id is not None and account.group_id not in {None, effective_group_id}:
+            raise HTTPException(status_code=403, detail="选中的账号里包含其他账号组的发布账号")
+
+    request_body = {
+        "caption": str(payload.caption or "").strip(),
+        "social_accounts": social_account_ids,
+    }
+    media_items = [{"url": url.strip()} for url in payload.media_urls if str(url).strip()]
+    if media_items:
+        request_body["media"] = media_items
+    if str(payload.scheduled_at or "").strip():
+        request_body["scheduled_at"] = str(payload.scheduled_at).strip()
+
+    response = postforme_request_json("POST", "/social-posts", api_key, json_body=request_body)
+    create_audit_log(
+        db,
+        action="postforme_social_post_created",
+        target_type="social_post",
+        target_id=str(response.get("id") or response.get("data", {}).get("id") or ""),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={
+            "group_id": effective_group_id,
+            "social_account_ids": social_account_ids,
+            "has_media": bool(media_items),
+            "scheduled_at": payload.scheduled_at,
+        },
+    )
+    db.commit()
+    return {"ok": True, "item": response}
 
 
 @app.get("/oauth/{platform}/start")
@@ -2279,6 +2616,7 @@ def create_group(
         owner_user_id=payload.owner_user_id,
         status=payload.status.strip() or "active",
         remark=payload.remark.strip(),
+        postforme_api_key=payload.postforme_api_key.strip(),
     )
     db.add(record)
     db.flush()
@@ -2298,7 +2636,10 @@ def create_group(
         actor_type="user",
         actor_code=actor_user.username,
         actor_user_id=actor_user.id,
-        detail={"owner_user_id": payload.owner_user_id},
+        detail={
+            "owner_user_id": payload.owner_user_id,
+            "has_postforme_api_key": bool(record.postforme_api_key),
+        },
     )
     db.commit()
     db.refresh(record)
@@ -2323,6 +2664,8 @@ def update_group(
         record.status = payload.status.strip() or record.status
     if payload.remark is not None:
         record.remark = payload.remark.strip()
+    if payload.postforme_api_key is not None:
+        record.postforme_api_key = payload.postforme_api_key.strip()
     create_audit_log(
         db,
         action="group_updated",
@@ -2331,7 +2674,10 @@ def update_group(
         actor_type="user",
         actor_code=actor_user.username,
         actor_user_id=actor_user.id,
-        detail={"status": record.status},
+        detail={
+            "status": record.status,
+            "has_postforme_api_key": bool(record.postforme_api_key),
+        },
     )
     db.commit()
     db.refresh(record)

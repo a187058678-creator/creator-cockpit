@@ -219,8 +219,8 @@ export default function DashboardHome() {
         <EntryCard
           href="/accounts"
           title="平台账号"
-          hint="统一绑定 TikTok、YouTube、Facebook、Instagram、X 平台账号。"
-          meta="按账号组做 OAuth 接入和账号归组"
+          hint="通过 Post for Me 统一绑定 TikTok、YouTube、Facebook、Instagram、X 平台账号。"
+          meta="先绑定远程账号，再按账号组做归组"
         />
         <EntryCard
           href="/workers"

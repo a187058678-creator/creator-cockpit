@@ -60,6 +60,9 @@ def ensure_runtime_columns():
             "max_parallel_tasks": 'ALTER TABLE worker_nodes ADD COLUMN max_parallel_tasks INTEGER DEFAULT 1',
             "scheduler_weight": 'ALTER TABLE worker_nodes ADD COLUMN scheduler_weight INTEGER DEFAULT 100',
         },
+        "account_groups": {
+            "postforme_api_key": "ALTER TABLE account_groups ADD COLUMN postforme_api_key TEXT DEFAULT ''",
+        },
     }
     inspector = inspect(engine)
     with engine.begin() as connection:

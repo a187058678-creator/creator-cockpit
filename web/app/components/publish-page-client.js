@@ -5,13 +5,23 @@ import Link from "next/link";
 import {
   DashboardShell,
   Section,
+  authFetch,
   buttonStyle,
   cardStyle,
   clearStoredPublishDraft,
   getStoredPublishDraft,
   inputStyle,
+  readJson,
   secondaryButtonStyle,
 } from "./dashboard-ui";
+
+const platformLabels = {
+  tiktok: "TikTok",
+  youtube: "YouTube",
+  facebook: "Facebook",
+  instagram: "Instagram",
+  x: "X",
+};
 
 function copyText(value, setMessage, successText) {
   if (!value) {
@@ -31,7 +41,11 @@ function copyText(value, setMessage, successText) {
 export default function PublishPageClient() {
   const [message, setMessage] = useState("正在读取发布草稿...");
   const [draft, setDraft] = useState(null);
-  const [form, setForm] = useState({
+  const [groups, setGroups] = useState([]);
+  const [accounts, setAccounts] = useState([]);
+  const [selectedAccountIds, setSelectedAccountIds] = useState([]);
+  const [busy, setBusy] = useState("");
+  const [publishForm, setPublishForm] = useState({
     title: "",
     hook: "",
     caption: "",
@@ -39,7 +53,13 @@ export default function PublishPageClient() {
     optimizedPrompt: "",
     videoPrompt: "",
     videoUrl: "",
+    scheduledAt: "",
   });
+
+  const currentGroup = useMemo(
+    () => groups.find((item) => String(item.id) === String(draft?.group_id || "")) || null,
+    [groups, draft?.group_id]
+  );
 
   useEffect(() => {
     const nextDraft = getStoredPublishDraft();
@@ -48,7 +68,7 @@ export default function PublishPageClient() {
       return;
     }
     setDraft(nextDraft);
-    setForm({
+    setPublishForm({
       title: nextDraft.publish?.title || "",
       hook: nextDraft.publish?.hook || "",
       caption: nextDraft.publish?.caption || "",
@@ -56,21 +76,81 @@ export default function PublishPageClient() {
       optimizedPrompt: nextDraft.optimized_prompt || "",
       videoPrompt: nextDraft.video_prompt || "",
       videoUrl: nextDraft.video_url || "",
+      scheduledAt: "",
     });
     setMessage(`已载入任务 #${nextDraft.task_id} 的发布草稿`);
   }, []);
 
+  useEffect(() => {
+    authFetch("/api/groups", { cache: "no-store" })
+      .then(readJson)
+      .then((data) => {
+        setGroups(data.items || []);
+      })
+      .catch((error) => {
+        setMessage(error.message || "加载账号组失败");
+      });
+  }, []);
+
   const combinedPublishCopy = useMemo(() => {
-    return [form.title, form.hook, form.caption, form.hashtags]
+    return [publishForm.title, publishForm.hook, publishForm.caption, publishForm.hashtags]
       .map((item) => String(item || "").trim())
       .filter(Boolean)
       .join("\n");
-  }, [form]);
+  }, [publishForm]);
+
+  async function loadAccounts() {
+    if (!draft?.group_id) {
+      setAccounts([]);
+      return;
+    }
+    const query = new URLSearchParams();
+    query.set("auth_type", "postforme");
+    query.set("status", "active");
+    query.set("limit", "100");
+    query.set("group_id", String(draft.group_id));
+    const data = await readJson(await authFetch(`/api/platform-accounts?${query.toString()}`, { cache: "no-store" }));
+    setAccounts(data.items || []);
+  }
+
+  async function syncAccounts() {
+    if (!draft?.group_id) {
+      setMessage("当前草稿还没有关联账号组");
+      return;
+    }
+    setBusy("sync");
+    setMessage("正在同步 Post for Me 账号...");
+    try {
+      await readJson(
+        await authFetch("/api/postforme/social-accounts/sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            group_id: draft.group_id,
+            platforms: [],
+          }),
+        })
+      );
+      await loadAccounts();
+      setMessage("Post for Me 账号已同步");
+    } catch (error) {
+      setMessage(error.message || "同步发布账号失败");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  useEffect(() => {
+    loadAccounts().catch((error) => {
+      setMessage(error.message || "加载发布账号失败");
+    });
+  }, [draft?.group_id]);
 
   function clearDraft() {
     clearStoredPublishDraft();
     setDraft(null);
-    setForm({
+    setSelectedAccountIds([]);
+    setPublishForm({
       title: "",
       hook: "",
       caption: "",
@@ -78,18 +158,63 @@ export default function PublishPageClient() {
       optimizedPrompt: "",
       videoPrompt: "",
       videoUrl: "",
+      scheduledAt: "",
     });
     setMessage("发布中心草稿已清空");
+  }
+
+  function toggleAccount(accountId) {
+    setSelectedAccountIds((prev) =>
+      prev.includes(accountId) ? prev.filter((item) => item !== accountId) : [...prev, accountId]
+    );
+  }
+
+  async function createSocialPost() {
+    if (!draft?.group_id) {
+      setMessage("当前草稿还没有关联账号组");
+      return;
+    }
+    if (selectedAccountIds.length === 0) {
+      setMessage("请先选择至少一个发布账号");
+      return;
+    }
+    setBusy("publish");
+    setMessage("正在通过 Post for Me 创建发布任务...");
+    try {
+      const scheduledAt = publishForm.scheduledAt ? new Date(publishForm.scheduledAt).toISOString() : null;
+      const data = await readJson(
+        await authFetch("/api/postforme/social-posts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            group_id: draft.group_id,
+            social_account_ids: selectedAccountIds,
+            caption: combinedPublishCopy,
+            media_urls: publishForm.videoUrl ? [publishForm.videoUrl] : [],
+            scheduled_at: scheduledAt,
+          }),
+        })
+      );
+      const postId = data.item?.id || data.item?.data?.id || "";
+      setMessage(postId ? `Post for Me 发布任务已创建：${postId}` : "Post for Me 发布任务已创建");
+    } catch (error) {
+      setMessage(error.message || "创建发布任务失败");
+    } finally {
+      setBusy("");
+    }
   }
 
   return (
     <DashboardShell
       title="发布中心"
-      description="这里先承接 AI 文案工作流送过来的草稿，方便继续复制、整理和后续接正式发布链。"
+      description="这里直接使用草稿所属账号组保存的 Post for Me API Key，不需要每台浏览器单独再填。"
       action={
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
           <Link href="/agent-flow" style={{ ...secondaryButtonStyle, textDecoration: "none", display: "inline-flex", alignItems: "center" }}>
             返回 AI 文案工作流
+          </Link>
+          <Link href="/accounts" style={{ ...secondaryButtonStyle, textDecoration: "none", display: "inline-flex", alignItems: "center" }}>
+            去平台账号页
           </Link>
           <button type="button" style={secondaryButtonStyle} onClick={clearDraft}>
             清空草稿
@@ -97,7 +222,7 @@ export default function PublishPageClient() {
         </div>
       }
     >
-      <Section title="当前消息" hint="显示最近一次接收或复制动作。">
+      <Section title="当前消息" hint="显示最近一次接收、复制、同步或发帖动作。">
         <div style={{ fontSize: 14, color: "#e2e8f0", wordBreak: "break-word" }}>{message}</div>
       </Section>
 
@@ -113,7 +238,7 @@ export default function PublishPageClient() {
             <div style={{ display: "grid", gap: 10, fontSize: 13, color: "#cbd5e1" }}>
               <div>任务 ID：#{draft.task_id}</div>
               <div>任务标题：{draft.task_title || "-"}</div>
-              <div>账号组：{draft.group_id || "-"}</div>
+              <div>账号组：{currentGroup?.group_name || draft.group_id || "-"}</div>
               <div>选题：{draft.selected_topic || "-"}</div>
               <div>来源说明：{draft.source_value || "-"}</div>
             </div>
@@ -127,45 +252,121 @@ export default function PublishPageClient() {
             <button type="button" style={buttonStyle} onClick={() => copyText(combinedPublishCopy, setMessage, "已复制完整发布文案")}>
               复制完整发布文案
             </button>
-            <button type="button" style={secondaryButtonStyle} onClick={() => copyText(form.title, setMessage, "已复制标题")}>
+            <button type="button" style={secondaryButtonStyle} onClick={() => copyText(publishForm.title, setMessage, "已复制标题")}>
               复制标题
             </button>
-            <button type="button" style={secondaryButtonStyle} onClick={() => copyText(form.caption, setMessage, "已复制正文")}>
+            <button type="button" style={secondaryButtonStyle} onClick={() => copyText(publishForm.caption, setMessage, "已复制正文")}>
               复制正文
             </button>
-            <button type="button" style={secondaryButtonStyle} onClick={() => copyText(form.optimizedPrompt, setMessage, "已复制优化提示词")}>
+            <button type="button" style={secondaryButtonStyle} onClick={() => copyText(publishForm.optimizedPrompt, setMessage, "已复制优化提示词")}>
               复制优化提示词
             </button>
           </div>
         </Section>
       </section>
 
-      <Section title="发布草稿" hint="可以在这里继续微调，再复制到你的正式发布链。">
+      <Section title="组级 Post for Me 配置" hint="发布中心会直接读取当前草稿所属账号组的配置。">
+        <div style={{ display: "grid", gap: 10, fontSize: 13, color: "#cbd5e1" }}>
+          <div>当前账号组：{currentGroup?.group_name || "未匹配到账号组"}</div>
+          <div>
+            API Key 状态：
+            {currentGroup?.has_postforme_api_key
+              ? ` 已配置 ${currentGroup.masked_postforme_api_key || ""}`
+              : " 未配置，请先去平台账号页给当前组保存 API Key"}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              style={secondaryButtonStyle}
+              onClick={syncAccounts}
+              disabled={busy === "sync" || !currentGroup?.has_postforme_api_key}
+            >
+              {busy === "sync" ? "同步中..." : "同步发布账号"}
+            </button>
+          </div>
+        </div>
+      </Section>
+
+      <Section title="发布账号" hint="这里列出当前组下已同步的 Post for Me active 账号。">
+        <div style={{ display: "grid", gap: 10 }}>
+          {accounts.length === 0 ? (
+            <div style={{ fontSize: 13, color: "#94a3b8" }}>当前还没有可用的 Post for Me 账号，先去平台账号页绑定并同步。</div>
+          ) : (
+            accounts.map((account) => (
+              <label
+                key={account.id}
+                style={{
+                  ...cardStyle,
+                  padding: 12,
+                  display: "flex",
+                  gap: 12,
+                  alignItems: "flex-start",
+                  cursor: "pointer",
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedAccountIds.includes(account.platform_user_id)}
+                  onChange={() => toggleAccount(account.platform_user_id)}
+                  style={{ marginTop: 4 }}
+                />
+                <div style={{ display: "grid", gap: 4 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700 }}>
+                    {platformLabels[account.platform] || account.platform} / {account.account_name || account.platform_user_id}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#94a3b8" }}>
+                    {account.account_handle || account.platform_user_id} | 组 {account.group_id || "-"} | {account.status}
+                  </div>
+                </div>
+              </label>
+            ))
+          )}
+        </div>
+      </Section>
+
+      <Section title="发布草稿" hint="可以在这里继续微调，再直接提交到 Post for Me。">
         <div style={{ display: "grid", gap: 12 }}>
           <input
             style={inputStyle}
-            value={form.title}
-            onChange={(event) => setForm((prev) => ({ ...prev, title: event.target.value }))}
+            value={publishForm.title}
+            onChange={(event) => setPublishForm((prev) => ({ ...prev, title: event.target.value }))}
             placeholder="标题"
           />
           <textarea
             style={{ ...inputStyle, minHeight: 72, resize: "vertical" }}
-            value={form.hook}
-            onChange={(event) => setForm((prev) => ({ ...prev, hook: event.target.value }))}
+            value={publishForm.hook}
+            onChange={(event) => setPublishForm((prev) => ({ ...prev, hook: event.target.value }))}
             placeholder="Hook"
           />
           <textarea
             style={{ ...inputStyle, minHeight: 140, resize: "vertical" }}
-            value={form.caption}
-            onChange={(event) => setForm((prev) => ({ ...prev, caption: event.target.value }))}
+            value={publishForm.caption}
+            onChange={(event) => setPublishForm((prev) => ({ ...prev, caption: event.target.value }))}
             placeholder="正文"
           />
           <input
             style={inputStyle}
-            value={form.hashtags}
-            onChange={(event) => setForm((prev) => ({ ...prev, hashtags: event.target.value }))}
+            value={publishForm.hashtags}
+            onChange={(event) => setPublishForm((prev) => ({ ...prev, hashtags: event.target.value }))}
             placeholder="标签"
           />
+          <input
+            style={inputStyle}
+            type="datetime-local"
+            value={publishForm.scheduledAt}
+            onChange={(event) => setPublishForm((prev) => ({ ...prev, scheduledAt: event.target.value }))}
+          />
+          <div style={{ fontSize: 12, color: "#94a3b8" }}>
+            留空就是立即发布；填写时间就是定时发布。
+          </div>
+          <button
+            type="button"
+            style={buttonStyle}
+            onClick={createSocialPost}
+            disabled={busy === "publish" || !currentGroup?.has_postforme_api_key}
+          >
+            {busy === "publish" ? "提交中..." : "提交到 Post for Me"}
+          </button>
         </div>
       </Section>
 
@@ -180,26 +381,31 @@ export default function PublishPageClient() {
           <div style={{ display: "grid", gap: 12 }}>
             <textarea
               style={{ ...inputStyle, minHeight: 180, resize: "vertical" }}
-              value={form.optimizedPrompt}
-              onChange={(event) => setForm((prev) => ({ ...prev, optimizedPrompt: event.target.value }))}
+              value={publishForm.optimizedPrompt}
+              onChange={(event) => setPublishForm((prev) => ({ ...prev, optimizedPrompt: event.target.value }))}
               placeholder="优化提示词"
             />
             <textarea
               style={{ ...inputStyle, minHeight: 180, resize: "vertical" }}
-              value={form.videoPrompt}
-              onChange={(event) => setForm((prev) => ({ ...prev, videoPrompt: event.target.value }))}
+              value={publishForm.videoPrompt}
+              onChange={(event) => setPublishForm((prev) => ({ ...prev, videoPrompt: event.target.value }))}
               placeholder="视频提示词"
             />
           </div>
         </Section>
 
-        <Section title="视频结果" hint="如果 AI 工作流已经拿到了视频地址，这里会直接带过来。">
+        <Section title="视频结果" hint="如果 AI 工作流已经拿到了视频地址，这里会直接带过来给 Post for Me 当媒体 URL。">
           <div style={{ ...cardStyle, padding: 14, display: "grid", gap: 10, fontSize: 13, color: "#cbd5e1" }}>
-            <div style={{ wordBreak: "break-all" }}>{form.videoUrl || "当前还没有视频结果 URL"}</div>
+            <input
+              style={inputStyle}
+              value={publishForm.videoUrl}
+              onChange={(event) => setPublishForm((prev) => ({ ...prev, videoUrl: event.target.value }))}
+              placeholder="视频 URL"
+            />
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {form.videoUrl ? (
+              {publishForm.videoUrl ? (
                 <a
-                  href={form.videoUrl}
+                  href={publishForm.videoUrl}
                   target="_blank"
                   rel="noreferrer"
                   style={{ ...buttonStyle, textDecoration: "none", display: "inline-flex", alignItems: "center" }}
@@ -210,7 +416,7 @@ export default function PublishPageClient() {
               <button
                 type="button"
                 style={secondaryButtonStyle}
-                onClick={() => copyText(form.videoUrl, setMessage, "已复制视频地址")}
+                onClick={() => copyText(publishForm.videoUrl, setMessage, "已复制视频地址")}
               >
                 复制视频地址
               </button>

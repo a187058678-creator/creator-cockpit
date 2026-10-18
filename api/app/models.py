@@ -36,6 +36,7 @@ class AccountGroup(Base):
     owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="active")
     remark: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
+    postforme_api_key: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
