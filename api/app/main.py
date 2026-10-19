@@ -54,6 +54,8 @@ SUPPORTED_PLATFORM_CODES = ["tiktok", "youtube", "facebook", "instagram", "x"]
 POST_FOR_ME_BASE_URL = os.getenv("POST_FOR_ME_BASE_URL", "https://api.postforme.dev/v1").rstrip("/")
 POST_FOR_ME_DEFAULT_API_KEY = os.getenv("POST_FOR_ME_DEFAULT_API_KEY", "pfm_live_B3ER8EQnwSegCteqWkhymm").strip()
 PUBLIC_BUSINESS_API_MODE = str(os.getenv("PUBLIC_BUSINESS_API_MODE", "1")).strip().lower() in {"1", "true", "yes", "on"}
+PUBLIC_TEST_GROUP_CODE = os.getenv("PUBLIC_TEST_GROUP_CODE", "public-test").strip() or "public-test"
+PUBLIC_TEST_GROUP_NAME = os.getenv("PUBLIC_TEST_GROUP_NAME", "默认测试组").strip() or "默认测试组"
 
 
 def clamp_int(value: Any, default: int, minimum: int, maximum: int) -> int:
@@ -918,7 +920,7 @@ def resolve_postforme_api_key(
     direct_api_key = str(header_api_key or "").strip()
     if direct_api_key:
         resolved_group_id = None
-        if requested_group_id is not None:
+        if requested_group_id is not None or PUBLIC_BUSINESS_API_MODE:
             resolved_group_id = resolve_effective_group_id(
                 db,
                 actor_user,
@@ -929,7 +931,7 @@ def resolve_postforme_api_key(
 
     if POST_FOR_ME_DEFAULT_API_KEY:
         resolved_group_id = None
-        if requested_group_id is not None:
+        if requested_group_id is not None or PUBLIC_BUSINESS_API_MODE:
             resolved_group_id = resolve_effective_group_id(
                 db,
                 actor_user,
@@ -1852,7 +1854,40 @@ def get_active_user_session_or_401(db: Session, authorization: Optional[str]) ->
     return session_record, user_record
 
 
-def get_public_business_actor_or_503(db: Session) -> UserAccount:
+def build_public_business_actor() -> UserAccount:
+    return UserAccount(
+        username="public-test",
+        password_hash="",
+        display_name="公共测试模式",
+        role="admin",
+        status="active",
+    )
+
+
+def is_public_business_actor(user: UserAccount) -> bool:
+    return user.id is None and (user.username or "").strip().lower() == "public-test"
+
+
+def ensure_public_test_group(db: Session) -> AccountGroup:
+    record = db.scalar(select(AccountGroup).where(AccountGroup.group_code == PUBLIC_TEST_GROUP_CODE))
+    if record:
+        if (record.status or "").strip().lower() != "active":
+            record.status = "active"
+            db.flush()
+        return record
+    record = AccountGroup(
+        group_name=PUBLIC_TEST_GROUP_NAME,
+        group_code=PUBLIC_TEST_GROUP_CODE,
+        owner_user_id=None,
+        status="active",
+        remark="公共测试模式自动创建的默认账号组",
+    )
+    db.add(record)
+    db.flush()
+    return record
+
+
+def get_public_business_actor(db: Session) -> UserAccount:
     admin_user = db.scalar(
         select(UserAccount)
         .where(UserAccount.status == "active", UserAccount.role == "admin")
@@ -1869,7 +1904,7 @@ def get_public_business_actor_or_503(db: Session) -> UserAccount:
     )
     if fallback_user:
         return fallback_user
-    raise HTTPException(status_code=503, detail="当前没有可用的活动用户，无法进入公共测试模式")
+    return build_public_business_actor()
 
 
 def require_strict_active_user(db: Session, authorization: Optional[str]) -> UserAccount:
@@ -1882,7 +1917,7 @@ def require_active_user(db: Session, authorization: Optional[str]) -> UserAccoun
     if access_token:
         return require_strict_active_user(db, authorization)
     if PUBLIC_BUSINESS_API_MODE:
-        return get_public_business_actor_or_503(db)
+        return get_public_business_actor(db)
     return require_strict_active_user(db, authorization)
 
 
@@ -1945,6 +1980,9 @@ def resolve_effective_group_id(
     if requested_group_id is not None:
         resolve_group_scope(db, user, requested_group_id, require_for_non_admin=True)
         return requested_group_id
+
+    if PUBLIC_BUSINESS_API_MODE:
+        return ensure_public_test_group(db).id
 
     if is_admin_user(user):
         return None
@@ -2628,6 +2666,9 @@ def list_groups(
     db: Session = Depends(get_db),
 ):
     actor_user = require_active_user(db, authorization)
+    if PUBLIC_BUSINESS_API_MODE and (db.scalar(select(func.count()).select_from(AccountGroup)) or 0) == 0:
+        ensure_public_test_group(db)
+        db.commit()
     statement = select(AccountGroup).order_by(desc(AccountGroup.id)).limit(limit)
     statement = apply_group_scope(statement, AccountGroup.id, resolve_group_scope(db, actor_user, None))
     items = db.scalars(statement).all()
@@ -3297,13 +3338,12 @@ def create_task(
     actor_user = require_active_user(db, authorization)
     if payload.group_id is None and not is_admin_user(actor_user):
         raise HTTPException(status_code=400, detail="非管理员创建任务必须指定账号组")
-    group_scope = resolve_group_scope(
+    effective_group_id = resolve_effective_group_id(
         db,
         actor_user,
         payload.group_id,
-        require_for_non_admin=True,
+        required_for_non_admin_message="请先选择任务归属账号组",
     )
-    effective_group_id = group_scope[0] if group_scope else payload.group_id
 
     normalized_payload = normalize_task_payload(payload.payload)
     runtime_state = {

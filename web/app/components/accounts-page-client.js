@@ -71,7 +71,7 @@ export default function AccountsPageClient() {
       const nextGroups = await loadGroups();
       setGroups(nextGroups);
       let effectiveGroupId = nextGroupId;
-      if (!effectiveGroupId && nextGroups.length === 1) {
+      if (!effectiveGroupId && nextGroups.length > 0) {
         effectiveGroupId = String(nextGroups[0].id);
         setGroupFilter(effectiveGroupId);
       }
