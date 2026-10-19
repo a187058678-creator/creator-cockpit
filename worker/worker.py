@@ -991,7 +991,7 @@ class WorkerProcessor:
         filters.append(f"atempo={remaining:.6f}")
         return filters
 
-    def download_youtube(self, task: dict, source_url: str, paths: TaskPaths) -> Path:
+    def download_ytdlp_source(self, task: dict, source_url: str, paths: TaskPaths) -> Path:
         output_template = str(paths.raw_dir / "source.%(ext)s")
         ffmpeg_location = self.ffmpeg_bin
         if Path(self.ffmpeg_bin).suffix.lower() == ".exe":
@@ -1015,6 +1015,26 @@ class WorkerProcessor:
             raise RuntimeError("yt-dlp 下载完成后未找到素材文件")
         return files[0]
 
+    def is_ytdlp_platform_source(self, source_type: str, source_value: str) -> bool:
+        normalized_type = (source_type or "").strip().lower()
+        if normalized_type in {"youtube", "tiktok", "douyin"}:
+            return True
+
+        normalized_value = (source_value or "").strip().lower()
+        return any(
+            domain in normalized_value
+            for domain in [
+                "youtube.com",
+                "youtu.be",
+                "tiktok.com",
+                "vm.tiktok.com",
+                "vt.tiktok.com",
+                "douyin.com",
+                "iesdouyin.com",
+                "v.douyin.com",
+            ]
+        )
+
     def download_http_file(self, task: dict, source_url: str, paths: TaskPaths) -> Path:
         parsed = urlparse(source_url)
         suffix = Path(parsed.path).suffix or ".bin"
@@ -1033,8 +1053,8 @@ class WorkerProcessor:
         source_type = (task.get("source_type") or self.client.default_source_type).lower()
         source_value = task.get("source_value") or ""
 
-        if source_type == "youtube" or "youtube.com" in source_value.lower() or "youtu.be" in source_value.lower():
-            return self.download_youtube(task, source_value, paths)
+        if self.is_ytdlp_platform_source(source_type, source_value):
+            return self.download_ytdlp_source(task, source_value, paths)
 
         if source_type in {"http", "https", "download", "direct_url"} or source_value.lower().startswith("http"):
             return self.download_http_file(task, source_value, paths)
@@ -1048,7 +1068,7 @@ class WorkerProcessor:
             return target_path
 
         if payload["source"].get("asset_key"):
-            raise RuntimeError("当前版本暂未实现从 R2 回拉 asset_key，请先使用 youtube/http/local_file")
+            raise RuntimeError("当前版本暂未实现从 R2 回拉 asset_key，请先使用 youtube/tiktok/douyin/http/local_file")
 
         raise RuntimeError(f"暂不支持的素材来源：{source_type}")
 
