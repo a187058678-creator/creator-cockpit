@@ -2018,6 +2018,70 @@ def get_active_worker_token_or_401(
     return token_record
 
 
+def resolve_worker_registration_group_id(
+    db: Session,
+    *,
+    worker_code: str,
+    authorization: Optional[str],
+    x_worker_token: Optional[str],
+) -> tuple[Optional[WorkerToken], int]:
+    access_token = extract_access_token(authorization, x_worker_token)
+    token_record = None
+    if access_token:
+        try:
+            token_record = get_active_worker_token_or_401(
+                db,
+                worker_code=worker_code,
+                authorization=authorization,
+                x_worker_token=x_worker_token,
+            )
+        except HTTPException:
+            if not PUBLIC_BUSINESS_API_MODE:
+                raise
+    elif not PUBLIC_BUSINESS_API_MODE:
+        raise HTTPException(status_code=401, detail="当前操作需要 Worker Token")
+
+    if token_record:
+        return token_record, int(token_record.group_id or ensure_public_test_group(db).id)
+
+    return None, ensure_public_test_group(db).id
+
+
+def resolve_worker_task_access_context(
+    db: Session,
+    *,
+    worker_code: str,
+    authorization: Optional[str],
+    x_worker_token: Optional[str],
+) -> tuple[WorkerNode, int, Optional[int]]:
+    access_token = extract_access_token(authorization, x_worker_token)
+    token_record = None
+    if access_token:
+        try:
+            token_record = get_active_worker_token_or_401(
+                db,
+                worker_code=worker_code,
+                authorization=authorization,
+                x_worker_token=x_worker_token,
+            )
+        except HTTPException:
+            if not PUBLIC_BUSINESS_API_MODE:
+                raise
+    elif not PUBLIC_BUSINESS_API_MODE:
+        raise HTTPException(status_code=401, detail="当前操作需要 Worker Token")
+
+    worker = get_worker_or_404(db, worker_code)
+    if token_record:
+        if worker.group_id != token_record.group_id:
+            raise HTTPException(status_code=409, detail="当前 Worker 节点归组与 Worker Token 不一致")
+        return worker, int(token_record.group_id or ensure_public_test_group(db).id), token_record.id
+
+    effective_group_id = worker.group_id or ensure_public_test_group(db).id
+    if worker.group_id != effective_group_id:
+        worker.group_id = effective_group_id
+    return worker, int(effective_group_id), None
+
+
 @app.get("/health")
 def health(db: Session = Depends(get_db)):
     total_records = db.scalar(select(func.count()).select_from(AssetRecord)) or 0
@@ -3006,7 +3070,7 @@ def register_worker(
     if not worker_code:
         raise HTTPException(status_code=400, detail="Worker Code 不能为空")
 
-    token_record = get_active_worker_token_or_401(
+    token_record, effective_group_id = resolve_worker_registration_group_id(
         db,
         worker_code=worker_code,
         authorization=authorization,
@@ -3016,7 +3080,7 @@ def register_worker(
     if not record:
         record = WorkerNode(
             worker_code=worker_code,
-            group_id=token_record.group_id,
+            group_id=effective_group_id,
             display_name=payload.display_name.strip() or worker_code,
             status="idle",
             machine_info=payload.machine_info.strip(),
@@ -3029,7 +3093,7 @@ def register_worker(
         )
         db.add(record)
     else:
-        record.group_id = token_record.group_id
+        record.group_id = effective_group_id
         record.display_name = payload.display_name.strip() or record.display_name
         record.status = "idle"
         record.machine_info = payload.machine_info.strip()
@@ -3047,19 +3111,20 @@ def register_worker(
         actor_type="worker",
         actor_code=worker_code,
         detail={
-            "worker_token_id": token_record.id,
-            "group_id": token_record.group_id,
+            "worker_token_id": token_record.id if token_record else None,
+            "group_id": effective_group_id,
             "max_parallel_tasks": payload.max_parallel_tasks,
             "scheduler_weight": payload.scheduler_weight,
         },
     )
     db.commit()
     db.refresh(record)
-    db.refresh(token_record)
+    if token_record:
+        db.refresh(token_record)
     return {
         "ok": True,
         "item": serialize_worker_node(record),
-        "worker_token": serialize_worker_token(token_record),
+        "worker_token": serialize_worker_token(token_record) if token_record else None,
     }
 
 
@@ -3778,16 +3843,13 @@ def claim_task(
     x_worker_token: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    token_record = get_active_worker_token_or_401(
+    worker, effective_group_id, worker_token_id = resolve_worker_task_access_context(
         db,
         worker_code=payload.worker_code,
         authorization=authorization,
         x_worker_token=x_worker_token,
     )
-    worker = get_worker_or_404(db, payload.worker_code)
-    if worker.group_id != token_record.group_id:
-        raise HTTPException(status_code=409, detail="当前 Worker 节点归组与 Worker Token 不一致")
-    recover_stale_task_leases(db, group_id=token_record.group_id)
+    recover_stale_task_leases(db, group_id=effective_group_id)
 
     current_running_task = db.scalar(
         select(TaskRecord)
@@ -3799,7 +3861,7 @@ def claim_task(
     if current_running_task and available_slots <= 0:
         return {"ok": True, "item": serialize_task_record(current_running_task), "reused": True}
 
-    task = select_claimable_task_for_worker(db, worker, token_record.group_id)
+    task = select_claimable_task_for_worker(db, worker, effective_group_id)
     if not task:
         sync_worker_dispatch_state(db, worker, "暂无可领取任务")
         db.commit()
@@ -3831,7 +3893,7 @@ def claim_task(
         status_before=previous_status,
         status_after=task.status,
         worker_code=payload.worker_code,
-        worker_token_id=token_record.id,
+        worker_token_id=worker_token_id,
         attempt_count=int(state.get("attempt_count", 0)),
         retry_count=int(state.get("retry_count", 0)),
         detail={
@@ -3854,21 +3916,18 @@ def complete_task(
     x_worker_token: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    token_record = get_active_worker_token_or_401(
+    worker, effective_group_id, worker_token_id = resolve_worker_task_access_context(
         db,
         worker_code=payload.worker_code,
         authorization=authorization,
         x_worker_token=x_worker_token,
     )
     task = get_task_or_404(db, task_id)
-    if token_record.group_id is not None and task.group_id != token_record.group_id:
+    if effective_group_id is not None and task.group_id != effective_group_id:
         raise HTTPException(status_code=403, detail="当前 Worker Token 无权完成其他账号组任务")
     if task.assigned_worker_code != payload.worker_code:
         raise HTTPException(status_code=409, detail="该任务未分配给当前 Worker")
 
-    worker = get_worker_or_404(db, payload.worker_code)
-    if worker.group_id != token_record.group_id:
-        raise HTTPException(status_code=409, detail="当前 Worker 节点归组与 Worker Token 不一致")
     state = get_task_runtime_state(task)
     state["last_error"] = ""
     state["output"] = payload.result
@@ -3888,7 +3947,7 @@ def complete_task(
         status_before=previous_status,
         status_after=task.status,
         worker_code=payload.worker_code,
-        worker_token_id=token_record.id,
+        worker_token_id=worker_token_id,
         attempt_count=int(state.get("attempt_count", 0)),
         retry_count=int(state.get("retry_count", 0)),
         detail={"result": payload.result},
@@ -3906,21 +3965,18 @@ def fail_task(
     x_worker_token: Optional[str] = Header(default=None),
     db: Session = Depends(get_db),
 ):
-    token_record = get_active_worker_token_or_401(
+    worker, effective_group_id, worker_token_id = resolve_worker_task_access_context(
         db,
         worker_code=payload.worker_code,
         authorization=authorization,
         x_worker_token=x_worker_token,
     )
     task = get_task_or_404(db, task_id)
-    if token_record.group_id is not None and task.group_id != token_record.group_id:
+    if effective_group_id is not None and task.group_id != effective_group_id:
         raise HTTPException(status_code=403, detail="当前 Worker Token 无权回写其他账号组任务")
     if task.assigned_worker_code != payload.worker_code:
         raise HTTPException(status_code=409, detail="该任务未分配给当前 Worker")
 
-    worker = get_worker_or_404(db, payload.worker_code)
-    if worker.group_id != token_record.group_id:
-        raise HTTPException(status_code=409, detail="当前 Worker 节点归组与 Worker Token 不一致")
     state = get_task_runtime_state(task)
     max_retries = int(state.get("max_retries", 2))
     next_retry_count = int(state.get("retry_count", 0))
@@ -3962,7 +4018,7 @@ def fail_task(
         status_before=previous_status,
         status_after=task.status,
         worker_code=payload.worker_code,
-        worker_token_id=token_record.id,
+        worker_token_id=worker_token_id,
         attempt_count=int(state.get("attempt_count", 0)),
         retry_count=int(state.get("retry_count", 0)),
         error_message=payload.error_message,

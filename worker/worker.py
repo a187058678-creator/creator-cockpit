@@ -485,7 +485,6 @@ class WorkerClient:
                 "scheduler_weight": self.scheduler_weight,
                 "heartbeat_note": "Worker 启动完成，已通过 Token 注册",
             },
-            require_token=True,
         )
 
     def heartbeat(self, *, status: str, current_task_title: str = "", heartbeat_note: str = ""):
@@ -503,13 +502,12 @@ class WorkerClient:
         return self._post("/workers/heartbeat", payload)
 
     def claim_task(self):
-        return self._post("/worker/tasks/claim", {"worker_code": self.worker_code}, require_token=True)
+        return self._post("/worker/tasks/claim", {"worker_code": self.worker_code})
 
     def complete_task(self, task_id: int, result: dict):
         return self._post(
             f"/worker/tasks/{task_id}/complete",
             {"worker_code": self.worker_code, "result": result},
-            require_token=True,
         )
 
     def fail_task(self, task_id: int, error_message: str, *, retryable: bool, result: dict):
@@ -521,7 +519,6 @@ class WorkerClient:
                 "retryable": retryable,
                 "result": result,
             },
-            require_token=True,
         )
 
 
