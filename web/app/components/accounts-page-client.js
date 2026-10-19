@@ -39,6 +39,7 @@ export default function AccountsPageClient() {
   const [groupFilter, setGroupFilter] = useState("");
   const [platformFilter, setPlatformFilter] = useState("");
   const [busy, setBusy] = useState("");
+  const [authLinks, setAuthLinks] = useState({});
   const [message, setMessage] = useState("先选择账号组，再开始绑定和同步远程账号。");
 
   const currentGroup = useMemo(
@@ -67,6 +68,7 @@ export default function AccountsPageClient() {
 
   async function reloadAll(nextGroupId = groupFilter, nextPlatform = platformFilter) {
     setMessage("正在刷新 Post for Me 账号...");
+    setAuthLinks({});
     try {
       const nextGroups = await loadGroups();
       setGroups(nextGroups);
@@ -125,6 +127,25 @@ export default function AccountsPageClient() {
     }
   }
 
+  async function copyText(text) {
+    if (!text) {
+      return;
+    }
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "readonly");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    document.body.removeChild(textarea);
+  }
+
   async function startConnect(platform) {
     if (!groupFilter) {
       setMessage("请先选择账号组");
@@ -146,8 +167,12 @@ export default function AccountsPageClient() {
       if (!data.auth_url) {
         throw new Error("Post for Me 没有返回授权地址");
       }
-      window.open(data.auth_url, "_blank", "noopener,noreferrer");
-      setMessage(`已打开 ${platformLabels[platform] || platform} 授权页，完成后回到这里点击“同步远程账号”`);
+      setAuthLinks((current) => ({
+        ...current,
+        [platform]: data.auth_url,
+      }));
+      await copyText(data.auth_url);
+      setMessage(`${platformLabels[platform] || platform} 授权地址已复制，你可以直接粘贴打开，完成后回到这里点击“同步远程账号”`);
     } catch (error) {
       setMessage(error.message || "创建授权地址失败");
     } finally {
@@ -261,7 +286,7 @@ export default function AccountsPageClient() {
         <div style={{ fontSize: 14, color: "#e2e8f0", wordBreak: "break-word" }}>{message}</div>
       </Section>
 
-      <Section title="绑定远程账号" hint="点平台按钮会打开 Post for Me 授权页；授权完成后回到这里，再点“同步远程账号”。">
+      <Section title="绑定远程账号" hint="点平台按钮会申请授权地址，地址会直接显示在按钮里并自动复制；授权完成后回到这里，再点“同步远程账号”。">
         <div
           style={{
             display: "grid",
@@ -287,11 +312,22 @@ export default function AccountsPageClient() {
               </div>
               <button
                 type="button"
-                style={buttonStyle}
+                style={{
+                  ...buttonStyle,
+                  minHeight: 44,
+                  height: "auto",
+                  whiteSpace: "normal",
+                  lineHeight: 1.4,
+                  overflowWrap: "anywhere",
+                  wordBreak: "break-all",
+                }}
                 disabled={busy === `connect-${platform}` || !currentGroup}
                 onClick={() => startConnect(platform)}
+                title={authLinks[platform] || `申请授权${label}地址`}
               >
-                {busy === `connect-${platform}` ? "打开中..." : `绑定 ${label}`}
+                {busy === `connect-${platform}`
+                  ? "申请中..."
+                  : authLinks[platform] || `申请授权${label}地址`}
               </button>
             </div>
           ))}
