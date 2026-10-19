@@ -27,7 +27,16 @@ export async function proxyJson(url, init = {}, request) {
     headers: withAuthHeaders(request, init.headers || {}),
   };
   const response = await fetch(url, nextInit);
-  const data = await response.json();
+  const rawText = await response.text();
+  let data;
+  try {
+    data = rawText ? JSON.parse(rawText) : {};
+  } catch {
+    data = {
+      ok: false,
+      detail: rawText || `上游接口返回了 ${response.status}，但没有可解析的 JSON 内容`,
+    };
+  }
   return NextResponse.json(data, { status: response.status });
 }
 

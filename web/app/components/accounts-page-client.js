@@ -146,9 +146,26 @@ export default function AccountsPageClient() {
     document.body.removeChild(textarea);
   }
 
+  function getAuthButtonLabel(platform) {
+    const label = platformLabels[platform] || platform;
+    if (authLinks[platform]) {
+      return `复制${label}授权链接`;
+    }
+    return `申请授权${label}地址`;
+  }
+
   async function startConnect(platform) {
     if (!groupFilter) {
       setMessage("请先选择账号组");
+      return;
+    }
+    if (authLinks[platform]) {
+      try {
+        await copyText(authLinks[platform]);
+        setMessage(`${platformLabels[platform] || platform} 授权链接已再次复制，你可以直接粘贴打开`);
+      } catch (error) {
+        setMessage(error.message || "复制授权链接失败");
+      }
       return;
     }
     setBusy(`connect-${platform}`);
@@ -286,7 +303,7 @@ export default function AccountsPageClient() {
         <div style={{ fontSize: 14, color: "#e2e8f0", wordBreak: "break-word" }}>{message}</div>
       </Section>
 
-      <Section title="绑定远程账号" hint="点平台按钮会申请授权地址，地址会直接显示在按钮里并自动复制；授权完成后回到这里，再点“同步远程账号”。">
+      <Section title="绑定远程账号" hint="点平台按钮会申请授权地址并自动复制；拿到地址后，按钮会变成“复制授权链接”，再次点击就会继续复制。">
         <div
           style={{
             display: "grid",
@@ -312,22 +329,12 @@ export default function AccountsPageClient() {
               </div>
               <button
                 type="button"
-                style={{
-                  ...buttonStyle,
-                  minHeight: 44,
-                  height: "auto",
-                  whiteSpace: "normal",
-                  lineHeight: 1.4,
-                  overflowWrap: "anywhere",
-                  wordBreak: "break-all",
-                }}
+                style={buttonStyle}
                 disabled={busy === `connect-${platform}` || !currentGroup}
                 onClick={() => startConnect(platform)}
-                title={authLinks[platform] || `申请授权${label}地址`}
+                title={authLinks[platform] || getAuthButtonLabel(platform)}
               >
-                {busy === `connect-${platform}`
-                  ? "申请中..."
-                  : authLinks[platform] || `申请授权${label}地址`}
+                {busy === `connect-${platform}` ? "申请中..." : getAuthButtonLabel(platform)}
               </button>
             </div>
           ))}

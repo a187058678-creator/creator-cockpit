@@ -52,6 +52,15 @@ def init_db():
 
 def ensure_runtime_columns():
     columns_to_ensure = {
+        "task_records": {
+            "group_id": "ALTER TABLE task_records ADD COLUMN group_id INTEGER",
+            "created_by_user_id": "ALTER TABLE task_records ADD COLUMN created_by_user_id INTEGER",
+            "triggered_by_user_id": "ALTER TABLE task_records ADD COLUMN triggered_by_user_id INTEGER",
+        },
+        "task_execution_records": {
+            "group_id": "ALTER TABLE task_execution_records ADD COLUMN group_id INTEGER",
+            "actor_user_id": "ALTER TABLE task_execution_records ADD COLUMN actor_user_id INTEGER",
+        },
         "asset_records": {
             "group_id": 'ALTER TABLE asset_records ADD COLUMN group_id INTEGER',
         },
