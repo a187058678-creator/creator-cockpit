@@ -3515,15 +3515,24 @@ def worker_heartbeat(
                 raise HTTPException(status_code=403, detail="当前用户已被禁用")
             session_record.last_used_at = utcnow()
         else:
-            token_record = get_active_worker_token_or_401(
-                db,
-                worker_code=payload.worker_code,
-                authorization=authorization,
-                x_worker_token=x_worker_token,
-            )
+            try:
+                token_record = get_active_worker_token_or_401(
+                    db,
+                    worker_code=payload.worker_code,
+                    authorization=authorization,
+                    x_worker_token=x_worker_token,
+                )
+            except HTTPException:
+                if PUBLIC_BUSINESS_API_MODE:
+                    actor_user = get_public_business_actor(db)
+                else:
+                    raise
 
     if not actor_user and not token_record:
-        raise HTTPException(status_code=401, detail="提交 Worker 心跳需要用户会话或 Worker Token")
+        if PUBLIC_BUSINESS_API_MODE:
+            actor_user = get_public_business_actor(db)
+        else:
+            raise HTTPException(status_code=401, detail="提交 Worker 心跳需要用户会话或 Worker Token")
 
     effective_group_id = (
         token_record.group_id
