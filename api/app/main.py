@@ -33,6 +33,14 @@ from app.models import (
     UserAccount,
     UserGroupMember,
     UserSession,
+    WorkflowAsset,
+    WorkflowAssetBundle,
+    WorkflowPublishLink,
+    WorkflowProject,
+    WorkflowRun,
+    WorkflowRunStage,
+    WorkflowTemplate,
+    WorkflowTemplateVersion,
     WorkerNode,
     WorkerToken,
 )
@@ -596,6 +604,52 @@ class PostForMeCreatePostRequest(BaseModel):
     media_urls: list[str] = Field(default_factory=list)
     scheduled_at: Optional[str] = None
     group_id: Optional[int] = None
+
+
+class CreateAgentFlowRunRequest(BaseModel):
+    template_id: int
+    template_version_id: Optional[int] = None
+    group_id: Optional[int] = None
+    project_id: Optional[int] = None
+    title: str = ""
+    run_type: str = "single"
+    priority: int = Field(default=100, ge=1, le=999)
+    source_mode: str = "manual"
+    brief_payload: dict = Field(default_factory=dict)
+    platform_targets: list[str] = Field(default_factory=list)
+
+
+class SelectWorkflowAssetRequest(BaseModel):
+    asset_id: int
+
+
+class UpdateWorkflowAssetRequest(BaseModel):
+    title: Optional[str] = None
+    content_text: Optional[str] = None
+    content_json: Optional[Any] = None
+
+
+class CreateWorkflowProjectRequest(BaseModel):
+    group_id: Optional[int] = None
+    project_name: str
+    template_id: Optional[int] = None
+    platform: str = "tiktok"
+    subject_domain: str = ""
+    remark: str = ""
+
+
+class UpdateWorkflowProjectRequest(BaseModel):
+    project_name: Optional[str] = None
+    template_id: Optional[int] = None
+    platform: Optional[str] = None
+    subject_domain: Optional[str] = None
+    status: Optional[str] = None
+    remark: Optional[str] = None
+
+
+class ApplyWorkflowTemplatePresetRequest(BaseModel):
+    preset_type: str
+    preset_code: str
 
 
 def get_required_env(name: str) -> str:
@@ -1496,6 +1550,900 @@ def serialize_task_record(record: TaskRecord):
         "created_at": record.created_at.isoformat() if record.created_at else None,
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,
     }
+
+
+def get_default_agent_flow_brief_schema() -> dict:
+    return {
+        "fields": [
+            {"key": "goal", "label": "任务目标", "type": "text", "required": True},
+            {"key": "topic_seed", "label": "选题方向", "type": "textarea", "required": True},
+            {"key": "platform", "label": "目标平台", "type": "select", "options": ["tiktok", "youtube", "xiaohongshu"]},
+            {"key": "audience", "label": "目标人群", "type": "text"},
+            {"key": "tone", "label": "文案风格", "type": "text"},
+            {"key": "language", "label": "语言", "type": "text"},
+            {"key": "reference_prompt", "label": "参考提示词", "type": "textarea"},
+            {"key": "reference_copy", "label": "参考文案", "type": "textarea"},
+            {"key": "max_topics", "label": "候选选题数", "type": "number"},
+            {"key": "video_enabled", "label": "生成视频提示词", "type": "boolean"},
+        ]
+    }
+
+
+def get_default_agent_flow_stage_schema() -> list[dict]:
+    return [
+        {"code": "brief_collect", "name": "任务 Brief", "required_capability": "editor"},
+        {"code": "topic_generate", "name": "选题池", "required_capability": "llm-agent"},
+        {"code": "script_generate", "name": "脚本", "required_capability": "llm-agent"},
+        {"code": "storyboard_generate", "name": "分镜", "required_capability": "llm-agent"},
+        {"code": "prompt_expand", "name": "提示词", "required_capability": "llm-agent"},
+        {"code": "generate_assets", "name": "生成资产", "required_capability": "video-gen"},
+        {"code": "publish_copy_generate", "name": "发布稿", "required_capability": "llm-agent"},
+    ]
+
+
+def get_default_agent_flow_model_config() -> dict:
+    return {
+        "deepseek": {
+            "enabled": True,
+            "model": "deepseek-chat",
+            "temperature": 0.8,
+            "max_topics": 5,
+        },
+        "video": {
+            "enabled": False,
+            "provider": "agnes",
+            "model": "agnes-video-2.5-flash",
+            "seconds": "5",
+            "size": "1280x720",
+            "poll_timeout_seconds": 120,
+            "poll_interval_seconds": 10,
+        },
+    }
+
+
+def get_default_agent_flow_style_bibles() -> list[dict]:
+    return [
+        {
+            "code": "hook_contrast",
+            "name": "高点击反差口播",
+            "summary": "强钩子、强反差、适合短视频起号",
+            "tone": "高点击、强反差、节奏快",
+            "keywords": ["先抛结果", "冲突对比", "压缩废话", "结尾留钩子"],
+            "opening_patterns": ["很多人以为...", "别再直接...", "你以为...其实..."],
+        },
+        {
+            "code": "coach_practical",
+            "name": "陪跑实战派",
+            "summary": "像运营顾问在旁边拆步骤，适合转化和留资",
+            "tone": "直给、具体、像在带做",
+            "keywords": ["少空话", "给步骤", "强调执行门槛", "避免玄学表达"],
+            "opening_patterns": ["我直接把流程给你", "先别急着做全套", "你先把这一步跑通"],
+        },
+        {
+            "code": "authority_explainer",
+            "name": "权威解释型",
+            "summary": "适合知识型账号，重结论和框架感",
+            "tone": "稳、清楚、结论先行",
+            "keywords": ["一句话定结论", "框架拆解", "少情绪词", "强调判断标准"],
+            "opening_patterns": ["先说结论", "这个问题核心就两点", "很多账号卡在这里"],
+        },
+    ]
+
+
+def get_default_agent_flow_character_bibles() -> list[dict]:
+    return [
+        {
+            "code": "ai_operator",
+            "name": "AI运营操盘手",
+            "summary": "擅长把复杂工作流拆成可执行动作",
+            "persona": {
+                "identity": "有实操经验的内容操盘手",
+                "traits": ["结果导向", "不说空话", "先闭环后扩展"],
+                "speaking_style": "像在带团队落地，不绕弯",
+            },
+        },
+        {
+            "code": "newbie_coach",
+            "name": "新手陪跑教练",
+            "summary": "适合低门槛转化和教程向内容",
+            "persona": {
+                "identity": "懂新手痛点的陪跑教练",
+                "traits": ["耐心", "鼓励", "拆解细"],
+                "speaking_style": "一步一步说清楚，降低焦虑",
+            },
+        },
+        {
+            "code": "growth_analyst",
+            "name": "增长分析师",
+            "summary": "适合做数据、策略和案例拆解",
+            "persona": {
+                "identity": "偏策略与数据判断的增长分析师",
+                "traits": ["克制", "重证据", "重结构"],
+                "speaking_style": "先结论再论证，适度引用指标",
+            },
+        },
+    ]
+
+
+def get_default_agent_flow_shot_bibles() -> list[dict]:
+    return [
+        {
+            "code": "fast_hook",
+            "name": "快节奏钩子型",
+            "summary": "3-5 秒一个信息点，适合短视频口播",
+            "rules": {"rhythm": "3-5 秒一个信息点", "camera": "中近景为主", "visuals": ["关键词大字卡", "对比截图", "步骤编号"]},
+        },
+        {
+            "code": "case_breakdown",
+            "name": "案例拆解型",
+            "summary": "先结果，再拆过程，适合教程和复盘",
+            "rules": {"rhythm": "8-12 秒一个章节", "camera": "口播 + 屏录切换", "visuals": ["案例前后对比", "表格", "流程图"]},
+        },
+        {
+            "code": "story_drive",
+            "name": "故事推进型",
+            "summary": "适合人物、经历、项目推进类内容",
+            "rules": {"rhythm": "冲突点驱动转场", "camera": "情绪特写 + 插叙素材", "visuals": ["时间线", "关键节点字幕"]},
+        },
+    ]
+
+
+def get_default_agent_flow_model_presets() -> list[dict]:
+    return [
+        {
+            "code": "balanced_default",
+            "name": "平衡默认",
+            "summary": "优先保证稳定和速度，适合日常量产",
+            "config": get_default_agent_flow_model_config(),
+        },
+        {
+            "code": "fast_copy",
+            "name": "极速文案",
+            "summary": "关闭视频生成，先把选题和发布稿跑快",
+            "config": {
+                "deepseek": {"enabled": True, "model": "deepseek-chat", "temperature": 0.7, "max_topics": 8},
+                "video": {"enabled": False, "provider": "agnes", "model": "agnes-video-2.5-flash", "seconds": "5", "size": "1280x720"},
+            },
+        },
+        {
+            "code": "media_heavy",
+            "name": "重媒体产出",
+            "summary": "保留视频生成，适合最终成片前的完整链路",
+            "config": {
+                "deepseek": {"enabled": True, "model": "deepseek-chat", "temperature": 0.85, "max_topics": 5},
+                "video": {
+                    "enabled": True,
+                    "provider": "agnes",
+                    "model": "agnes-video-2.5-flash",
+                    "seconds": "5",
+                    "size": "1280x720",
+                    "poll_timeout_seconds": 180,
+                    "poll_interval_seconds": 10,
+                },
+            },
+        },
+    ]
+
+
+def get_default_agent_flow_stage_chain_presets() -> list[dict]:
+    return [
+        {
+            "code": "full_chain",
+            "name": "完整链路",
+            "summary": "Brief -> 选题 -> 脚本 -> 分镜 -> 提示词 -> 资产 -> 发布稿",
+            "stage_schema": get_default_agent_flow_stage_schema(),
+        },
+        {
+            "code": "copy_only",
+            "name": "纯文案链",
+            "summary": "不走视频生成，只保留文案核心阶段",
+            "stage_schema": [
+                {"code": "brief_collect", "name": "任务 Brief", "required_capability": "editor"},
+                {"code": "topic_generate", "name": "选题池", "required_capability": "llm-agent"},
+                {"code": "script_generate", "name": "脚本", "required_capability": "llm-agent"},
+                {"code": "prompt_expand", "name": "提示词", "required_capability": "llm-agent"},
+                {"code": "publish_copy_generate", "name": "发布稿", "required_capability": "llm-agent"},
+            ],
+        },
+        {
+            "code": "media_first",
+            "name": "媒体优先链",
+            "summary": "更强调分镜和生成资产，适合成片导向",
+            "stage_schema": [
+                {"code": "brief_collect", "name": "任务 Brief", "required_capability": "editor"},
+                {"code": "topic_generate", "name": "选题池", "required_capability": "llm-agent"},
+                {"code": "storyboard_generate", "name": "分镜", "required_capability": "llm-agent"},
+                {"code": "prompt_expand", "name": "提示词", "required_capability": "llm-agent"},
+                {"code": "generate_assets", "name": "生成资产", "required_capability": "video-gen"},
+                {"code": "publish_copy_generate", "name": "发布稿", "required_capability": "llm-agent"},
+            ],
+        },
+    ]
+
+
+def get_default_agent_flow_platform_presets() -> list[dict]:
+    return [
+        {"code": "tiktok", "name": "TikTok", "summary": "强钩子、快节奏、强转场", "recommended_style": "hook_contrast"},
+        {"code": "youtube", "name": "YouTube Shorts", "summary": "信息密度高，前 3 秒要交代主题", "recommended_style": "authority_explainer"},
+        {"code": "xiaohongshu", "name": "小红书", "summary": "更生活化和经验分享感", "recommended_style": "coach_practical"},
+    ]
+
+
+def get_agent_flow_settings_catalog() -> dict:
+    return {
+        "style_bibles": get_default_agent_flow_style_bibles(),
+        "character_bibles": get_default_agent_flow_character_bibles(),
+        "shot_bibles": get_default_agent_flow_shot_bibles(),
+        "model_presets": get_default_agent_flow_model_presets(),
+        "stage_chain_presets": get_default_agent_flow_stage_chain_presets(),
+        "platform_presets": get_default_agent_flow_platform_presets(),
+    }
+
+
+def find_agent_flow_preset(preset_type: str, preset_code: str) -> Optional[dict]:
+    catalog = get_agent_flow_settings_catalog()
+    items = catalog.get(preset_type)
+    if not isinstance(items, list):
+        return None
+    normalized_code = str(preset_code or "").strip()
+    for item in items:
+        if str(item.get("code") or "").strip() == normalized_code:
+            return item
+    return None
+
+
+def ensure_default_agent_flow_template(db: Session) -> tuple[WorkflowTemplate, WorkflowTemplateVersion]:
+    template = db.scalar(
+        select(WorkflowTemplate).where(WorkflowTemplate.template_code == "short-video-general")
+    )
+    if template:
+        version = db.scalar(
+            select(WorkflowTemplateVersion).where(
+                WorkflowTemplateVersion.id == template.current_version_id
+            )
+        )
+        if version:
+            return template, version
+
+    template = template or WorkflowTemplate(
+        group_id=ensure_public_test_group(db).id if PUBLIC_BUSINESS_API_MODE else None,
+        template_code="short-video-general",
+        template_name="通用短视频文案工作流",
+        category="short_video",
+        platform_scope_json=json.dumps(["tiktok", "youtube"], ensure_ascii=False),
+        style_type="高点击口播",
+        status="active",
+        remark="默认内置模板，先承接 agent_flow 最小闭环",
+        created_by_user_id=get_public_business_actor(db).id if PUBLIC_BUSINESS_API_MODE else None,
+    )
+    if template.id is None:
+        db.add(template)
+        db.flush()
+
+    version = WorkflowTemplateVersion(
+        template_id=template.id,
+        version_no=1,
+        version_name="v1 默认版",
+        brief_schema_json=json.dumps(get_default_agent_flow_brief_schema(), ensure_ascii=False),
+        stage_schema_json=json.dumps(get_default_agent_flow_stage_schema(), ensure_ascii=False),
+        prompt_blocks_json=json.dumps(
+            {
+                "role": "短视频策划与文案专家",
+                "goal": "输出可直接进入发布中心的选题、提示词和发布文案",
+                "constraints": ["输出紧凑", "强调钩子", "优先适配短视频平台"],
+            },
+            ensure_ascii=False,
+        ),
+        style_bible_json=json.dumps({"tone": "高点击、强反差、适合短视频口播"}, ensure_ascii=False),
+        shot_bible_json=json.dumps({"rhythm": "3-5 秒一个信息点"}, ensure_ascii=False),
+        default_model_config_json=json.dumps(get_default_agent_flow_model_config(), ensure_ascii=False),
+        output_schema_json=json.dumps(
+            {
+                "assets": ["topic_candidates", "script", "video_prompt", "publish_copy", "video_output"]
+            },
+            ensure_ascii=False,
+        ),
+        is_published=True,
+        created_by_user_id=get_public_business_actor(db).id if PUBLIC_BUSINESS_API_MODE else None,
+    )
+    db.add(version)
+    db.flush()
+    template.current_version_id = version.id
+    return template, version
+
+
+def get_workflow_template_or_404(db: Session, template_id: int) -> WorkflowTemplate:
+    record = db.scalar(select(WorkflowTemplate).where(WorkflowTemplate.id == template_id))
+    if not record:
+        raise HTTPException(status_code=404, detail="工作流模板不存在")
+    return record
+
+
+def get_workflow_template_version_or_404(db: Session, version_id: int) -> WorkflowTemplateVersion:
+    record = db.scalar(select(WorkflowTemplateVersion).where(WorkflowTemplateVersion.id == version_id))
+    if not record:
+        raise HTTPException(status_code=404, detail="工作流模板版本不存在")
+    return record
+
+
+def get_workflow_run_or_404(db: Session, run_id: int) -> WorkflowRun:
+    record = db.scalar(select(WorkflowRun).where(WorkflowRun.id == run_id))
+    if not record:
+        raise HTTPException(status_code=404, detail="工作流运行不存在")
+    return record
+
+
+def get_workflow_bundle_or_404(db: Session, bundle_id: int) -> WorkflowAssetBundle:
+    record = db.scalar(select(WorkflowAssetBundle).where(WorkflowAssetBundle.id == bundle_id))
+    if not record:
+        raise HTTPException(status_code=404, detail="资产包不存在")
+    return record
+
+
+def get_workflow_asset_or_404(db: Session, asset_id: int) -> WorkflowAsset:
+    record = db.scalar(select(WorkflowAsset).where(WorkflowAsset.id == asset_id))
+    if not record:
+        raise HTTPException(status_code=404, detail="资产不存在")
+    return record
+
+
+def get_workflow_project_or_404(db: Session, project_id: int) -> WorkflowProject:
+    record = db.scalar(select(WorkflowProject).where(WorkflowProject.id == project_id))
+    if not record:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    return record
+
+
+def get_workflow_stage_or_404(db: Session, stage_id: int) -> WorkflowRunStage:
+    record = db.scalar(select(WorkflowRunStage).where(WorkflowRunStage.id == stage_id))
+    if not record:
+        raise HTTPException(status_code=404, detail="阶段记录不存在")
+    return record
+
+
+def serialize_workflow_template_version(record: WorkflowTemplateVersion) -> dict:
+    return {
+        "id": record.id,
+        "template_id": record.template_id,
+        "version_no": record.version_no,
+        "version_name": record.version_name,
+        "brief_schema": load_json_field(record.brief_schema_json, {}),
+        "stage_schema": load_json_field(record.stage_schema_json, []),
+        "prompt_blocks": load_json_field(record.prompt_blocks_json, {}),
+        "style_bible": load_json_field(record.style_bible_json, {}),
+        "shot_bible": load_json_field(record.shot_bible_json, {}),
+        "default_model_config": load_json_field(record.default_model_config_json, {}),
+        "output_schema": load_json_field(record.output_schema_json, {}),
+        "is_published": bool(record.is_published),
+        "created_by_user_id": record.created_by_user_id,
+        "created_at": parse_datetime(record.created_at),
+    }
+
+
+def serialize_workflow_template(record: WorkflowTemplate, version: Optional[WorkflowTemplateVersion]) -> dict:
+    return {
+        "id": record.id,
+        "group_id": record.group_id,
+        "template_code": record.template_code,
+        "template_name": record.template_name,
+        "category": record.category,
+        "platform_scope": load_json_field(record.platform_scope_json, []),
+        "style_type": record.style_type,
+        "status": record.status,
+        "current_version_id": record.current_version_id,
+        "remark": record.remark,
+        "created_by_user_id": record.created_by_user_id,
+        "created_at": parse_datetime(record.created_at),
+        "updated_at": parse_datetime(record.updated_at),
+        "current_version": serialize_workflow_template_version(version) if version else None,
+    }
+
+
+def serialize_workflow_stage(record: WorkflowRunStage) -> dict:
+    return {
+        "id": record.id,
+        "run_id": record.run_id,
+        "stage_code": record.stage_code,
+        "stage_name": record.stage_name,
+        "stage_order": record.stage_order,
+        "worker_code": record.worker_code,
+        "required_capability": record.required_capability,
+        "input_payload": load_json_field(record.input_payload_json, {}),
+        "output_payload": load_json_field(record.output_payload_json, {}),
+        "status": record.status,
+        "retry_count": record.retry_count,
+        "error_message": record.error_message,
+        "started_at": parse_datetime(record.started_at),
+        "finished_at": parse_datetime(record.finished_at),
+        "created_at": parse_datetime(record.created_at),
+    }
+
+
+def serialize_workflow_asset(record: WorkflowAsset) -> dict:
+    return {
+        "id": record.id,
+        "group_id": record.group_id,
+        "bundle_id": record.bundle_id,
+        "run_stage_id": record.run_stage_id,
+        "asset_type": record.asset_type,
+        "asset_role": record.asset_role,
+        "title": record.title,
+        "content_text": record.content_text,
+        "content_json": load_json_field(record.content_json, {}),
+        "file_asset_id": record.file_asset_id,
+        "r2_key": record.r2_key,
+        "mime_type": record.mime_type,
+        "sort_order": record.sort_order,
+        "version_no": record.version_no,
+        "is_selected": bool(record.is_selected),
+        "created_at": parse_datetime(record.created_at),
+    }
+
+
+def serialize_workflow_bundle(record: WorkflowAssetBundle) -> dict:
+    return {
+        "id": record.id,
+        "group_id": record.group_id,
+        "run_id": record.run_id,
+        "bundle_code": record.bundle_code,
+        "bundle_name": record.bundle_name,
+        "content_type": record.content_type,
+        "primary_platform": record.primary_platform,
+        "status": record.status,
+        "summary": record.summary,
+        "created_at": parse_datetime(record.created_at),
+        "updated_at": parse_datetime(record.updated_at),
+    }
+
+
+def serialize_workflow_publish_link(record: WorkflowPublishLink) -> dict:
+    return {
+        "id": record.id,
+        "group_id": record.group_id,
+        "bundle_id": record.bundle_id,
+        "publish_draft_id": record.publish_draft_id,
+        "platform": record.platform,
+        "title_text": record.title_text,
+        "body_text": record.body_text,
+        "cover_asset_id": record.cover_asset_id,
+        "video_asset_id": record.video_asset_id,
+        "status": record.status,
+        "pushed_at": parse_datetime(record.pushed_at),
+        "created_at": parse_datetime(record.created_at),
+    }
+
+
+def serialize_workflow_project(record: WorkflowProject, *, template: Optional[WorkflowTemplate] = None) -> dict:
+    return {
+        "id": record.id,
+        "group_id": record.group_id,
+        "project_code": record.project_code,
+        "project_name": record.project_name,
+        "template_id": record.template_id,
+        "platform": record.platform,
+        "subject_domain": record.subject_domain,
+        "status": record.status,
+        "owner_user_id": record.owner_user_id,
+        "remark": record.remark,
+        "created_at": parse_datetime(record.created_at),
+        "updated_at": parse_datetime(record.updated_at),
+        "template": serialize_workflow_template(template, None) if template else None,
+    }
+
+
+def serialize_workflow_run(
+    record: WorkflowRun,
+    *,
+    template: Optional[WorkflowTemplate] = None,
+    template_version: Optional[WorkflowTemplateVersion] = None,
+    bundle: Optional[WorkflowAssetBundle] = None,
+    task: Optional[TaskRecord] = None,
+) -> dict:
+    return {
+        "id": record.id,
+        "group_id": record.group_id,
+        "project_id": record.project_id,
+        "template_id": record.template_id,
+        "template_version_id": record.template_version_id,
+        "task_record_id": record.task_record_id,
+        "run_code": record.run_code,
+        "run_type": record.run_type,
+        "title": record.title,
+        "brief_payload": load_json_field(record.brief_payload_json, {}),
+        "platform_targets": load_json_field(record.platform_targets_json, []),
+        "status": record.status,
+        "current_stage_code": record.current_stage_code,
+        "priority": record.priority,
+        "source_mode": record.source_mode,
+        "created_by_user_id": record.created_by_user_id,
+        "triggered_by_user_id": record.triggered_by_user_id,
+        "started_at": parse_datetime(record.started_at),
+        "finished_at": parse_datetime(record.finished_at),
+        "created_at": parse_datetime(record.created_at),
+        "updated_at": parse_datetime(record.updated_at),
+        "template": serialize_workflow_template(template, template_version) if template else None,
+        "task": serialize_task_record(task) if task else None,
+        "bundle": serialize_workflow_bundle(bundle) if bundle else None,
+    }
+
+
+def save_workflow_stage_payloads(record: WorkflowRunStage, input_payload: dict, output_payload: dict) -> bool:
+    next_input_json = json.dumps(input_payload or {}, ensure_ascii=False)
+    next_output_json = json.dumps(output_payload or {}, ensure_ascii=False)
+    changed = False
+    if record.input_payload_json != next_input_json:
+        record.input_payload_json = next_input_json
+        changed = True
+    if record.output_payload_json != next_output_json:
+        record.output_payload_json = next_output_json
+        changed = True
+    return changed
+
+
+def build_agent_flow_task_payload_from_template(
+    version: WorkflowTemplateVersion,
+    brief_payload: dict,
+    platform_targets: list[str],
+) -> dict:
+    normalized_platforms = ensure_str_list(platform_targets)
+    model_config = load_json_field(version.default_model_config_json, {})
+    deepseek_config = model_config.get("deepseek") if isinstance(model_config.get("deepseek"), dict) else {}
+    video_config = model_config.get("video") if isinstance(model_config.get("video"), dict) else {}
+    topic_seed = str(brief_payload.get("topic_seed") or "").strip()
+    platform = str(
+        brief_payload.get("platform")
+        or (normalized_platforms[0] if normalized_platforms else "tiktok")
+        or "tiktok"
+    ).strip()
+    payload = build_task_payload_defaults("balanced")
+    payload["publish"]["platforms"] = normalized_platforms or [platform]
+    payload["output"]["prefix"] = "agent-flow"
+    payload["execution"]["required_capabilities"] = ["llm-agent"]
+    payload["agent_flow"]["goal"] = str(
+        brief_payload.get("goal") or "选题/提示词优化/发布文案生成"
+    ).strip()
+    payload["agent_flow"]["topic_seed"] = topic_seed
+    payload["agent_flow"]["platform"] = platform or "tiktok"
+    payload["agent_flow"]["audience"] = str(brief_payload.get("audience") or "").strip()
+    payload["agent_flow"]["tone"] = str(brief_payload.get("tone") or "高点击、强反差、适合短视频口播").strip()
+    payload["agent_flow"]["language"] = str(brief_payload.get("language") or "zh-CN").strip()
+    payload["agent_flow"]["reference_prompt"] = str(brief_payload.get("reference_prompt") or "").strip()
+    payload["agent_flow"]["reference_copy"] = str(brief_payload.get("reference_copy") or "").strip()
+    payload["agent_flow"]["deepseek"]["enabled"] = coerce_bool(deepseek_config.get("enabled"), True)
+    payload["agent_flow"]["deepseek"]["model"] = str(deepseek_config.get("model") or "deepseek-chat").strip()
+    payload["agent_flow"]["deepseek"]["temperature"] = clamp_float(
+        brief_payload.get("temperature", deepseek_config.get("temperature")),
+        0.8,
+        0.0,
+        2.0,
+    )
+    payload["agent_flow"]["deepseek"]["max_topics"] = clamp_int(
+        brief_payload.get("max_topics", deepseek_config.get("max_topics")),
+        5,
+        1,
+        20,
+    )
+    payload["agent_flow"]["video"]["enabled"] = coerce_bool(
+        brief_payload.get("video_enabled", video_config.get("enabled")),
+        False,
+    )
+    payload["agent_flow"]["video"]["provider"] = str(video_config.get("provider") or "agnes").strip() or "agnes"
+    payload["agent_flow"]["video"]["model"] = str(
+        video_config.get("model") or "agnes-video-2.5-flash"
+    ).strip() or "agnes-video-2.5-flash"
+    payload["agent_flow"]["video"]["seconds"] = str(video_config.get("seconds") or "5").strip() or "5"
+    payload["agent_flow"]["video"]["size"] = str(video_config.get("size") or "1280x720").strip() or "1280x720"
+    payload["agent_flow"]["video"]["poll_timeout_seconds"] = clamp_int(
+        video_config.get("poll_timeout_seconds"),
+        120,
+        10,
+        3600,
+    )
+    payload["agent_flow"]["video"]["poll_interval_seconds"] = clamp_int(
+        video_config.get("poll_interval_seconds"),
+        10,
+        2,
+        300,
+    )
+    return normalize_task_payload(payload)
+
+
+def upsert_workflow_asset(
+    db: Session,
+    *,
+    bundle: WorkflowAssetBundle,
+    run_stage_id: Optional[int],
+    asset_type: str,
+    title: str,
+    content_text: str = "",
+    content_json: Optional[dict | list] = None,
+    mime_type: str = "",
+    r2_key: str = "",
+    sort_order: int = 0,
+):
+    existing = db.scalar(
+        select(WorkflowAsset).where(
+            WorkflowAsset.bundle_id == bundle.id,
+            WorkflowAsset.asset_type == asset_type,
+            WorkflowAsset.sort_order == sort_order,
+        )
+    )
+    record = existing or WorkflowAsset(
+        group_id=bundle.group_id,
+        bundle_id=bundle.id,
+        run_stage_id=run_stage_id,
+        asset_type=asset_type,
+        asset_role="primary",
+        title=title,
+        sort_order=sort_order,
+        version_no=1,
+        is_selected=True,
+    )
+    if existing is None:
+        db.add(record)
+    record.run_stage_id = run_stage_id
+    record.title = title
+    record.content_text = content_text
+    record.content_json = json.dumps(content_json or {}, ensure_ascii=False)
+    record.mime_type = mime_type
+    record.r2_key = r2_key
+    return record
+
+
+def sync_workflow_run_state(db: Session, run: WorkflowRun) -> bool:
+    changed = False
+    task = db.scalar(select(TaskRecord).where(TaskRecord.id == run.task_record_id)) if run.task_record_id else None
+    bundle = db.scalar(select(WorkflowAssetBundle).where(WorkflowAssetBundle.run_id == run.id))
+    stages = db.scalars(
+        select(WorkflowRunStage).where(WorkflowRunStage.run_id == run.id).order_by(WorkflowRunStage.stage_order)
+    ).all()
+    stage_by_code = {item.stage_code: item for item in stages}
+    task_state = get_task_runtime_state(task) if task else {}
+    brief_payload = load_json_field(run.brief_payload_json, {})
+    task_payload = normalize_task_payload(load_json_field(task.payload_json, {})) if task else build_task_payload_defaults("balanced")
+    output = task_state.get("output") if isinstance(task_state.get("output"), dict) else {}
+    agent_flow_output = output.get("agent_flow") if isinstance(output.get("agent_flow"), dict) else {}
+    deepseek_output = agent_flow_output.get("deepseek") if isinstance(agent_flow_output.get("deepseek"), dict) else {}
+    video_output = agent_flow_output.get("video") if isinstance(agent_flow_output.get("video"), dict) else {}
+    topic_input_payload = {
+        "goal": str(brief_payload.get("goal") or task_payload["agent_flow"]["goal"] or "").strip(),
+        "topic_seed": str(brief_payload.get("topic_seed") or task_payload["agent_flow"]["topic_seed"] or "").strip(),
+        "platform": str(brief_payload.get("platform") or task_payload["agent_flow"]["platform"] or "").strip(),
+        "audience": str(brief_payload.get("audience") or task_payload["agent_flow"]["audience"] or "").strip(),
+        "tone": str(brief_payload.get("tone") or task_payload["agent_flow"]["tone"] or "").strip(),
+        "language": str(brief_payload.get("language") or task_payload["agent_flow"]["language"] or "").strip(),
+        "reference_prompt": str(brief_payload.get("reference_prompt") or task_payload["agent_flow"]["reference_prompt"] or "").strip(),
+        "reference_copy": str(brief_payload.get("reference_copy") or task_payload["agent_flow"]["reference_copy"] or "").strip(),
+        "max_topics": int(task_payload["agent_flow"]["deepseek"]["max_topics"] or 5),
+        "video_enabled": bool(task_payload["agent_flow"]["video"]["enabled"]),
+    }
+    topic_output_payload = {
+        "selected_topic": str(deepseek_output.get("selected_topic") or "").strip(),
+        "topic_candidates": deepseek_output.get("topic_candidates") or deepseek_output.get("topics") or [],
+    }
+    optimized_prompt = str(deepseek_output.get("optimized_prompt") or "").strip()
+    video_prompt = str(deepseek_output.get("video_prompt") or "").strip()
+    publish_copy_output = deepseek_output.get("publish_copy") if isinstance(deepseek_output.get("publish_copy"), dict) else {}
+    stage_payload_map = {
+        "brief_collect": {
+            "input": brief_payload,
+            "output": topic_input_payload,
+        },
+        "topic_generate": {
+            "input": topic_input_payload,
+            "output": topic_output_payload,
+        },
+        "script_generate": {
+            "input": {
+                "selected_topic": topic_output_payload["selected_topic"],
+                "audience": topic_input_payload["audience"],
+                "tone": topic_input_payload["tone"],
+                "reference_copy": topic_input_payload["reference_copy"],
+            },
+            "output": {
+                "optimized_prompt": optimized_prompt,
+                "note": "当前执行链暂以优化提示词承接脚本生成结果",
+            },
+        },
+        "storyboard_generate": {
+            "input": {
+                "selected_topic": topic_output_payload["selected_topic"],
+                "optimized_prompt": optimized_prompt,
+            },
+            "output": {
+                "note": "当前执行链暂未拆分独立分镜输出，后续可在 Worker 侧补齐",
+            },
+        },
+        "prompt_expand": {
+            "input": {
+                "selected_topic": topic_output_payload["selected_topic"],
+                "optimized_prompt": optimized_prompt,
+                "reference_prompt": topic_input_payload["reference_prompt"],
+            },
+            "output": {
+                "optimized_prompt": optimized_prompt,
+                "video_prompt": video_prompt,
+            },
+        },
+        "generate_assets": {
+            "input": {
+                "video_enabled": bool(task_payload["agent_flow"]["video"]["enabled"]),
+                "video_prompt": video_prompt,
+                "provider": task_payload["agent_flow"]["video"]["provider"],
+                "model": task_payload["agent_flow"]["video"]["model"],
+            },
+            "output": video_output if isinstance(video_output, dict) else {},
+        },
+        "publish_copy_generate": {
+            "input": {
+                "selected_topic": topic_output_payload["selected_topic"],
+                "optimized_prompt": optimized_prompt,
+                "platforms": task_payload["publish"]["platforms"],
+            },
+            "output": publish_copy_output,
+        },
+    }
+
+    if task and run.status != task.status:
+        run.status = task.status
+        changed = True
+    previous_current_stage_code = run.current_stage_code
+    if task and task.status in {"pending", "queued", "running"}:
+        run.current_stage_code = run.current_stage_code or "topic_generate"
+    elif task and task.status == "success":
+        run.current_stage_code = "publish_copy_generate"
+    if previous_current_stage_code != run.current_stage_code:
+        changed = True
+    if task and task.status == "running" and run.started_at is None:
+        run.started_at = task.updated_at or utcnow()
+        changed = True
+    if task and task.status in {"success", "failed", "cancelled"}:
+        finished_at = task.updated_at or utcnow()
+        if run.finished_at != finished_at:
+            run.finished_at = finished_at
+            changed = True
+
+    active_stage_code = run.current_stage_code or "topic_generate"
+    active_stage = stage_by_code.get(active_stage_code)
+    active_stage_order = active_stage.stage_order if active_stage else 2
+    for stage in stages:
+        previous_status = stage.status
+        previous_worker_code = stage.worker_code
+        previous_error = stage.error_message
+        stage_payloads = stage_payload_map.get(stage.stage_code, {"input": {}, "output": {}})
+        if stage.stage_code == "brief_collect":
+            stage.status = "success"
+            stage.finished_at = stage.finished_at or run.created_at or utcnow()
+        elif not task:
+            stage.status = "pending"
+        elif task.status in {"pending", "queued"}:
+            if stage.stage_order < active_stage_order:
+                stage.status = "success"
+            elif stage.stage_order == active_stage_order:
+                stage.status = "queued"
+            else:
+                stage.status = "pending"
+        elif task.status == "running":
+            if stage.stage_order < active_stage_order:
+                stage.status = "success"
+            elif stage.stage_order == active_stage_order:
+                stage.status = "running"
+                stage.started_at = stage.started_at or utcnow()
+                stage.worker_code = task.assigned_worker_code or ""
+            else:
+                stage.status = "pending"
+        elif task.status == "success":
+            stage.status = "success"
+            stage.started_at = stage.started_at or task.created_at or utcnow()
+            stage.finished_at = task.updated_at or utcnow()
+            stage.worker_code = task.assigned_worker_code or stage.worker_code
+        else:
+            if stage.stage_order < active_stage_order:
+                stage.status = "success"
+            elif stage.stage_order == active_stage_order:
+                stage.status = "failed"
+                stage.error_message = str(task_state.get("last_error") or "")
+                stage.worker_code = task.assigned_worker_code or ""
+                stage.finished_at = task.updated_at or utcnow()
+            else:
+                stage.status = "pending"
+        if task and task.status == "failed" and stage.stage_code == "topic_generate":
+            stage_payloads = {
+                "input": stage_payloads.get("input") or {},
+                "output": {"last_error": str(task_state.get("last_error") or "")},
+            }
+        if save_workflow_stage_payloads(stage, stage_payloads.get("input") or {}, stage_payloads.get("output") or {}):
+            changed = True
+        if previous_status != stage.status or previous_worker_code != stage.worker_code or previous_error != stage.error_message:
+            changed = True
+
+    if bundle:
+        next_bundle_status = "ready" if task and task.status == "success" else "draft"
+        if bundle.status != next_bundle_status:
+            bundle.status = next_bundle_status
+            changed = True
+        summary = str(deepseek_output.get("selected_topic") or deepseek_output.get("optimized_prompt") or "").strip()
+        if summary and bundle.summary != summary:
+            bundle.summary = summary
+            changed = True
+
+    if bundle and task and task.status == "success":
+        topic_stage_id = stage_by_code.get("topic_generate").id if stage_by_code.get("topic_generate") else None
+        prompt_stage_id = stage_by_code.get("prompt_expand").id if stage_by_code.get("prompt_expand") else None
+        publish_stage_id = stage_by_code.get("publish_copy_generate").id if stage_by_code.get("publish_copy_generate") else None
+        asset_stage_id = stage_by_code.get("generate_assets").id if stage_by_code.get("generate_assets") else None
+        topic_candidates = deepseek_output.get("topic_candidates") or deepseek_output.get("topics") or []
+        upsert_workflow_asset(
+            db,
+            bundle=bundle,
+            run_stage_id=topic_stage_id,
+            asset_type="topic_candidates",
+            title="选题池",
+            content_json={
+                "selected_topic": deepseek_output.get("selected_topic") or "",
+                "candidates": topic_candidates,
+            },
+            sort_order=10,
+        )
+        optimized_prompt = str(deepseek_output.get("optimized_prompt") or "").strip()
+        if optimized_prompt:
+            upsert_workflow_asset(
+                db,
+                bundle=bundle,
+                run_stage_id=prompt_stage_id,
+                asset_type="script",
+                title="优化提示词",
+                content_text=optimized_prompt,
+                sort_order=20,
+            )
+        video_prompt = str(deepseek_output.get("video_prompt") or "").strip()
+        if video_prompt:
+            upsert_workflow_asset(
+                db,
+                bundle=bundle,
+                run_stage_id=prompt_stage_id,
+                asset_type="video_prompt",
+                title="视频提示词",
+                content_text=video_prompt,
+                sort_order=30,
+            )
+        publish_copy = deepseek_output.get("publish_copy") if isinstance(deepseek_output.get("publish_copy"), dict) else {}
+        if publish_copy:
+            hashtags = publish_copy.get("hashtags")
+            hashtags_text = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags or "")
+            upsert_workflow_asset(
+                db,
+                bundle=bundle,
+                run_stage_id=publish_stage_id,
+                asset_type="publish_copy",
+                title="发布稿",
+                content_text="\n".join(
+                    [
+                        f"标题：{publish_copy.get('title') or ''}",
+                        f"Hook：{publish_copy.get('hook') or ''}",
+                        f"正文：{publish_copy.get('caption') or ''}",
+                        f"标签：{hashtags_text}",
+                    ]
+                ).strip(),
+                content_json=publish_copy,
+                sort_order=40,
+            )
+        video_url = str(video_output.get("video_url") or "").strip()
+        if video_url:
+            upsert_workflow_asset(
+                db,
+                bundle=bundle,
+                run_stage_id=asset_stage_id,
+                asset_type="video_output",
+                title="视频结果",
+                content_text=video_url,
+                content_json=video_output,
+                mime_type="video/url",
+                sort_order=50,
+            )
+        changed = True
+
+    return changed
 
 
 def get_effective_worker_status(record: WorkerNode) -> str:
@@ -3392,6 +4340,1133 @@ def delete_asset(
         }
     except (BotoCoreError, ClientError) as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/agent-flow/templates")
+def list_agent_flow_templates(
+    group_id: Optional[int] = Query(default=None),
+    limit: int = Query(50, ge=1, le=100),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    if (db.scalar(select(func.count()).select_from(WorkflowTemplate)) or 0) == 0:
+        ensure_default_agent_flow_template(db)
+        db.commit()
+    statement = select(WorkflowTemplate).order_by(desc(WorkflowTemplate.id)).limit(limit)
+    statement = apply_group_scope(
+        statement,
+        WorkflowTemplate.group_id,
+        resolve_group_scope(db, actor_user, group_id),
+    )
+    items = db.scalars(statement).all()
+    versions = {}
+    version_ids = [item.current_version_id for item in items if item.current_version_id]
+    if version_ids:
+        versions = {
+            item.id: item
+            for item in db.scalars(
+                select(WorkflowTemplateVersion).where(WorkflowTemplateVersion.id.in_(version_ids))
+            ).all()
+        }
+    return {
+        "ok": True,
+        "items": [serialize_workflow_template(item, versions.get(item.current_version_id)) for item in items],
+    }
+
+
+@app.get("/agent-flow/templates/{template_id}/versions")
+def list_agent_flow_template_versions(
+    template_id: int,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    template = get_workflow_template_or_404(db, template_id)
+    if template.group_id is not None:
+        resolve_group_scope(db, actor_user, template.group_id)
+    items = db.scalars(
+        select(WorkflowTemplateVersion)
+        .where(WorkflowTemplateVersion.template_id == template_id)
+        .order_by(desc(WorkflowTemplateVersion.version_no), desc(WorkflowTemplateVersion.id))
+    ).all()
+    return {"ok": True, "items": [serialize_workflow_template_version(item) for item in items]}
+
+
+@app.post("/agent-flow/template-versions/{version_id}/publish")
+def publish_agent_flow_template_version(
+    version_id: int,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    version = get_workflow_template_version_or_404(db, version_id)
+    template = get_workflow_template_or_404(db, version.template_id)
+    if template.group_id is not None:
+        resolve_group_scope(db, actor_user, template.group_id)
+    sibling_versions = db.scalars(
+        select(WorkflowTemplateVersion).where(WorkflowTemplateVersion.template_id == template.id)
+    ).all()
+    for item in sibling_versions:
+        item.is_published = item.id == version.id
+    template.current_version_id = version.id
+    create_audit_log(
+        db,
+        action="agent_flow_template_version_published",
+        target_type="workflow_template",
+        target_id=str(template.id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"template_id": template.id, "version_id": version.id},
+    )
+    db.commit()
+    db.refresh(template)
+    db.refresh(version)
+    return {"ok": True, "item": serialize_workflow_template(template, version)}
+
+
+@app.post("/agent-flow/template-versions/{version_id}/apply-preset")
+def apply_agent_flow_template_version_preset(
+    version_id: int,
+    payload: ApplyWorkflowTemplatePresetRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    version = get_workflow_template_version_or_404(db, version_id)
+    template = get_workflow_template_or_404(db, version.template_id)
+    if template.group_id is not None:
+        resolve_group_scope(db, actor_user, template.group_id)
+    preset_type = str(payload.preset_type or "").strip()
+    preset_code = str(payload.preset_code or "").strip()
+    if not preset_type or not preset_code:
+        raise HTTPException(status_code=400, detail="预设类型和预设编码不能为空")
+    preset = find_agent_flow_preset(preset_type, preset_code)
+    if not preset:
+        raise HTTPException(status_code=404, detail="指定预设不存在")
+
+    if preset_type == "model_presets":
+        version.default_model_config_json = json.dumps(preset.get("config") or {}, ensure_ascii=False)
+    elif preset_type == "stage_chain_presets":
+        version.stage_schema_json = json.dumps(preset.get("stage_schema") or [], ensure_ascii=False)
+    elif preset_type == "style_bibles":
+        version.style_bible_json = json.dumps(preset, ensure_ascii=False)
+    elif preset_type == "shot_bibles":
+        rules = preset.get("rules") if isinstance(preset.get("rules"), dict) else preset
+        version.shot_bible_json = json.dumps(rules, ensure_ascii=False)
+    elif preset_type == "character_bibles":
+        prompt_blocks = load_json_field(version.prompt_blocks_json, {})
+        prompt_blocks["character_bible"] = preset
+        version.prompt_blocks_json = json.dumps(prompt_blocks, ensure_ascii=False)
+    else:
+        raise HTTPException(status_code=400, detail="当前预设类型暂不支持应用到模板版本")
+
+    create_audit_log(
+        db,
+        action="agent_flow_template_preset_applied",
+        target_type="workflow_template_version",
+        target_id=str(version.id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"template_id": template.id, "preset_type": preset_type, "preset_code": preset_code},
+    )
+    db.commit()
+    db.refresh(version)
+    return {"ok": True, "item": serialize_workflow_template_version(version)}
+
+
+@app.get("/agent-flow/projects")
+def list_agent_flow_projects(
+    group_id: Optional[int] = Query(default=None),
+    status: str = Query(default=""),
+    limit: int = Query(50, ge=1, le=100),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    statement = select(WorkflowProject).order_by(desc(WorkflowProject.id)).limit(limit)
+    statement = apply_group_scope(statement, WorkflowProject.group_id, resolve_group_scope(db, actor_user, group_id))
+    if status:
+        statement = statement.where(WorkflowProject.status == status.strip())
+    items = db.scalars(statement).all()
+    template_ids = [item.template_id for item in items if item.template_id]
+    templates = {
+        item.id: item
+        for item in db.scalars(select(WorkflowTemplate).where(WorkflowTemplate.id.in_(template_ids or [-1]))).all()
+    }
+    run_counts = {
+        project_id: count
+        for project_id, count in db.execute(
+            select(WorkflowRun.project_id, func.count(WorkflowRun.id))
+            .where(WorkflowRun.project_id.in_([item.id for item in items] or [-1]))
+            .group_by(WorkflowRun.project_id)
+        ).all()
+    }
+    return {
+        "ok": True,
+        "items": [
+            {**serialize_workflow_project(item, template=templates.get(item.template_id)), "run_count": int(run_counts.get(item.id, 0))}
+            for item in items
+        ],
+    }
+
+
+@app.post("/agent-flow/projects")
+def create_agent_flow_project(
+    payload: CreateWorkflowProjectRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    effective_group_id = resolve_effective_group_id(
+        db,
+        actor_user,
+        payload.group_id,
+        required_for_non_admin_message="请先选择账号组",
+    )
+    template = None
+    if payload.template_id is not None:
+        template = get_workflow_template_or_404(db, payload.template_id)
+        if template.group_id is not None:
+            resolve_group_scope(db, actor_user, template.group_id)
+    project_name = str(payload.project_name or "").strip()
+    if not project_name:
+        raise HTTPException(status_code=400, detail="项目名称不能为空")
+    base_code = normalize_code(project_name, fallback_prefix="project")
+    project_code = base_code
+    suffix = 1
+    while db.scalar(select(WorkflowProject).where(WorkflowProject.project_code == project_code)):
+        suffix += 1
+        project_code = f"{base_code}-{suffix}"
+    record = WorkflowProject(
+        group_id=effective_group_id,
+        project_code=project_code,
+        project_name=project_name,
+        template_id=payload.template_id,
+        platform=str(payload.platform or "tiktok").strip() or "tiktok",
+        subject_domain=str(payload.subject_domain or "").strip(),
+        status="active",
+        owner_user_id=actor_user.id,
+        remark=str(payload.remark or "").strip(),
+    )
+    db.add(record)
+    create_audit_log(
+        db,
+        action="agent_flow_project_created",
+        target_type="workflow_project",
+        target_id=str(project_code),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"group_id": effective_group_id, "template_id": payload.template_id},
+    )
+    db.commit()
+    db.refresh(record)
+    return {"ok": True, "item": serialize_workflow_project(record, template=template)}
+
+
+@app.get("/agent-flow/projects/{project_id}")
+def get_agent_flow_project(
+    project_id: int,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    record = get_workflow_project_or_404(db, project_id)
+    resolve_group_scope(db, actor_user, record.group_id)
+    template = db.scalar(select(WorkflowTemplate).where(WorkflowTemplate.id == record.template_id)) if record.template_id else None
+    run_count = db.scalar(select(func.count()).select_from(WorkflowRun).where(WorkflowRun.project_id == record.id)) or 0
+    return {"ok": True, "item": {**serialize_workflow_project(record, template=template), "run_count": int(run_count)}}
+
+
+@app.put("/agent-flow/projects/{project_id}")
+def update_agent_flow_project(
+    project_id: int,
+    payload: UpdateWorkflowProjectRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    record = get_workflow_project_or_404(db, project_id)
+    resolve_group_scope(db, actor_user, record.group_id)
+    if payload.project_name is not None:
+        next_name = str(payload.project_name).strip()
+        if not next_name:
+            raise HTTPException(status_code=400, detail="项目名称不能为空")
+        record.project_name = next_name
+    if payload.template_id is not None:
+        template = get_workflow_template_or_404(db, payload.template_id)
+        if template.group_id is not None:
+            resolve_group_scope(db, actor_user, template.group_id)
+        record.template_id = payload.template_id
+    if payload.platform is not None:
+        record.platform = str(payload.platform).strip() or record.platform
+    if payload.subject_domain is not None:
+        record.subject_domain = str(payload.subject_domain).strip()
+    if payload.status is not None:
+        record.status = str(payload.status).strip() or record.status
+    if payload.remark is not None:
+        record.remark = str(payload.remark)
+    create_audit_log(
+        db,
+        action="agent_flow_project_updated",
+        target_type="workflow_project",
+        target_id=str(record.id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"group_id": record.group_id, "template_id": record.template_id},
+    )
+    db.commit()
+    db.refresh(record)
+    template = db.scalar(select(WorkflowTemplate).where(WorkflowTemplate.id == record.template_id)) if record.template_id else None
+    return {"ok": True, "item": serialize_workflow_project(record, template=template)}
+
+
+@app.get("/agent-flow/projects/{project_id}/runs")
+def list_agent_flow_project_runs(
+    project_id: int,
+    limit: int = Query(20, ge=1, le=100),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    project = get_workflow_project_or_404(db, project_id)
+    resolve_group_scope(db, actor_user, project.group_id)
+    items = db.scalars(
+        select(WorkflowRun).where(WorkflowRun.project_id == project_id).order_by(desc(WorkflowRun.id)).limit(limit)
+    ).all()
+    changed = False
+    for item in items:
+        changed = sync_workflow_run_state(db, item) or changed
+    if changed:
+        db.commit()
+    template_ids = [item.template_id for item in items if item.template_id]
+    version_ids = [item.template_version_id for item in items if item.template_version_id]
+    task_ids = [item.task_record_id for item in items if item.task_record_id]
+    templates = {
+        item.id: item
+        for item in db.scalars(select(WorkflowTemplate).where(WorkflowTemplate.id.in_(template_ids or [-1]))).all()
+    }
+    versions = {
+        item.id: item
+        for item in db.scalars(select(WorkflowTemplateVersion).where(WorkflowTemplateVersion.id.in_(version_ids or [-1]))).all()
+    }
+    bundles = {
+        item.run_id: item
+        for item in db.scalars(
+            select(WorkflowAssetBundle).where(WorkflowAssetBundle.run_id.in_([item.id for item in items] or [-1]))
+        ).all()
+    }
+    tasks = {
+        item.id: item for item in db.scalars(select(TaskRecord).where(TaskRecord.id.in_(task_ids or [-1]))).all()
+    }
+    return {
+        "ok": True,
+        "project": serialize_workflow_project(project, template=templates.get(project.template_id)),
+        "items": [
+            serialize_workflow_run(
+                item,
+                template=templates.get(item.template_id),
+                template_version=versions.get(item.template_version_id),
+                bundle=bundles.get(item.id),
+                task=tasks.get(item.task_record_id),
+            )
+            for item in items
+        ],
+    }
+
+
+@app.get("/agent-flow/settings/presets")
+def get_agent_flow_settings_presets(
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    require_active_user(db, authorization)
+    return {"ok": True, **get_agent_flow_settings_catalog()}
+
+
+@app.get("/agent-flow/settings/style-bibles")
+def list_agent_flow_style_bibles(
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    require_active_user(db, authorization)
+    return {"ok": True, "items": get_default_agent_flow_style_bibles()}
+
+
+@app.get("/agent-flow/settings/character-bibles")
+def list_agent_flow_character_bibles(
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    require_active_user(db, authorization)
+    return {"ok": True, "items": get_default_agent_flow_character_bibles()}
+
+
+@app.get("/agent-flow/settings/shot-bibles")
+def list_agent_flow_shot_bibles(
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    require_active_user(db, authorization)
+    return {"ok": True, "items": get_default_agent_flow_shot_bibles()}
+
+
+@app.get("/agent-flow/settings/model-presets")
+def list_agent_flow_model_presets(
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    require_active_user(db, authorization)
+    return {"ok": True, "items": get_default_agent_flow_model_presets()}
+
+
+@app.get("/agent-flow/settings/stage-chain-presets")
+def list_agent_flow_stage_chain_presets(
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    require_active_user(db, authorization)
+    return {"ok": True, "items": get_default_agent_flow_stage_chain_presets()}
+
+
+@app.get("/agent-flow/settings/platform-presets")
+def list_agent_flow_platform_presets(
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    require_active_user(db, authorization)
+    return {"ok": True, "items": get_default_agent_flow_platform_presets()}
+
+
+@app.get("/agent-flow/summary")
+def agent_flow_summary(
+    group_id: Optional[int] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    group_scope = resolve_group_scope(db, actor_user, group_id)
+    total = db.scalar(
+        apply_group_scope(select(func.count()).select_from(WorkflowRun), WorkflowRun.group_id, group_scope)
+    ) or 0
+    pending = db.scalar(
+        apply_group_scope(
+            select(func.count()).select_from(WorkflowRun).where(WorkflowRun.status.in_(["pending", "queued"])),
+            WorkflowRun.group_id,
+            group_scope,
+        )
+    ) or 0
+    running = db.scalar(
+        apply_group_scope(
+            select(func.count()).select_from(WorkflowRun).where(WorkflowRun.status == "running"),
+            WorkflowRun.group_id,
+            group_scope,
+        )
+    ) or 0
+    success = db.scalar(
+        apply_group_scope(
+            select(func.count()).select_from(WorkflowRun).where(WorkflowRun.status == "success"),
+            WorkflowRun.group_id,
+            group_scope,
+        )
+    ) or 0
+    failed = db.scalar(
+        apply_group_scope(
+            select(func.count()).select_from(WorkflowRun).where(WorkflowRun.status == "failed"),
+            WorkflowRun.group_id,
+            group_scope,
+        )
+    ) or 0
+    latest = db.scalar(
+        apply_group_scope(select(WorkflowRun).order_by(desc(WorkflowRun.id)).limit(1), WorkflowRun.group_id, group_scope)
+    )
+    if latest:
+        sync_workflow_run_state(db, latest)
+        db.commit()
+    bundle = db.scalar(select(WorkflowAssetBundle).where(WorkflowAssetBundle.run_id == latest.id)) if latest else None
+    template = db.scalar(select(WorkflowTemplate).where(WorkflowTemplate.id == latest.template_id)) if latest else None
+    version = (
+        db.scalar(select(WorkflowTemplateVersion).where(WorkflowTemplateVersion.id == latest.template_version_id))
+        if latest and latest.template_version_id
+        else None
+    )
+    task = db.scalar(select(TaskRecord).where(TaskRecord.id == latest.task_record_id)) if latest and latest.task_record_id else None
+    return {
+        "ok": True,
+        "total": total,
+        "pending": pending,
+        "running": running,
+        "success": success,
+        "failed": failed,
+        "latest": serialize_workflow_run(latest, template=template, template_version=version, bundle=bundle, task=task) if latest else None,
+    }
+
+
+@app.post("/agent-flow/runs")
+def create_agent_flow_run(
+    payload: CreateAgentFlowRunRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    if (db.scalar(select(func.count()).select_from(WorkflowTemplate)) or 0) == 0:
+        ensure_default_agent_flow_template(db)
+        db.flush()
+
+    template = get_workflow_template_or_404(db, payload.template_id)
+    if template.group_id is not None:
+        resolve_group_scope(db, actor_user, template.group_id)
+    effective_group_id = resolve_effective_group_id(
+        db,
+        actor_user,
+        payload.group_id if payload.group_id is not None else template.group_id,
+        required_for_non_admin_message="请先选择账号组",
+    )
+    version_id = payload.template_version_id or template.current_version_id
+    if not version_id:
+        raise HTTPException(status_code=400, detail="当前模板还没有可用版本")
+    version = get_workflow_template_version_or_404(db, version_id)
+    if version.template_id != template.id:
+        raise HTTPException(status_code=400, detail="模板版本与模板不匹配")
+    project = None
+    if payload.project_id is not None:
+        project = get_workflow_project_or_404(db, payload.project_id)
+        resolve_group_scope(db, actor_user, project.group_id)
+        if project.group_id and project.group_id != effective_group_id:
+            raise HTTPException(status_code=400, detail="所选项目与账号组不一致")
+
+    brief_payload = payload.brief_payload if isinstance(payload.brief_payload, dict) else {}
+    platform_targets = ensure_str_list(payload.platform_targets)
+    task_payload = build_agent_flow_task_payload_from_template(version, brief_payload, platform_targets)
+    runtime_state = {
+        "attempt_count": 0,
+        "retry_count": 0,
+        "manual_retry_count": 0,
+        "max_retries": task_payload["execution"]["max_retries"],
+        "last_error": "",
+        "history": [],
+    }
+    append_task_history(runtime_state, "created", source_type="agent_flow")
+    task_priority = "high" if payload.priority <= 50 else "normal"
+    topic_seed = str(brief_payload.get("topic_seed") or "").strip()
+    title = str(payload.title or "").strip() or f"{template.template_name}-{topic_seed[:20] or '新运行'}"
+    task = TaskRecord(
+        title=title,
+        task_type="agent_flow",
+        source_type="manual",
+        source_value=topic_seed or str(brief_payload.get("goal") or "").strip(),
+        status="pending",
+        priority=task_priority,
+        group_id=effective_group_id,
+        created_by_user_id=actor_user.id,
+        triggered_by_user_id=actor_user.id,
+        payload_json=json.dumps(task_payload, ensure_ascii=False),
+        result_json=json.dumps(runtime_state, ensure_ascii=False),
+    )
+    db.add(task)
+    db.flush()
+
+    run = WorkflowRun(
+        group_id=effective_group_id,
+        project_id=project.id if project else None,
+        template_id=template.id,
+        template_version_id=version.id,
+        task_record_id=task.id,
+        run_code=f"run-{uuid.uuid4().hex[:10]}",
+        run_type=payload.run_type.strip() or "single",
+        title=title,
+        brief_payload_json=json.dumps(brief_payload, ensure_ascii=False),
+        platform_targets_json=json.dumps(platform_targets or [task_payload["agent_flow"]["platform"]], ensure_ascii=False),
+        status=task.status,
+        current_stage_code="topic_generate",
+        priority=payload.priority,
+        source_mode=payload.source_mode.strip() or "manual",
+        created_by_user_id=actor_user.id,
+        triggered_by_user_id=actor_user.id,
+    )
+    db.add(run)
+    db.flush()
+
+    stage_schema = load_json_field(version.stage_schema_json, get_default_agent_flow_stage_schema())
+    for index, stage in enumerate(stage_schema, start=1):
+        stage_code = str(stage.get("code") or f"stage_{index}").strip()
+        record = WorkflowRunStage(
+            run_id=run.id,
+            stage_code=stage_code,
+            stage_name=str(stage.get("name") or stage_code).strip(),
+            stage_order=index,
+            worker_code="",
+            required_capability=str(stage.get("required_capability") or "").strip(),
+            input_payload_json=json.dumps(brief_payload if stage_code == "brief_collect" else {}, ensure_ascii=False),
+            output_payload_json=json.dumps({}, ensure_ascii=False),
+            status="success" if stage_code == "brief_collect" else ("queued" if stage_code == "topic_generate" else "pending"),
+            retry_count=0,
+            error_message="",
+            started_at=utcnow() if stage_code == "brief_collect" else None,
+            finished_at=utcnow() if stage_code == "brief_collect" else None,
+        )
+        db.add(record)
+
+    bundle = WorkflowAssetBundle(
+        group_id=effective_group_id,
+        run_id=run.id,
+        bundle_code=f"bundle-{uuid.uuid4().hex[:10]}",
+        bundle_name=title,
+        content_type="short_video",
+        primary_platform=(platform_targets[0] if platform_targets else task_payload["agent_flow"]["platform"]),
+        status="draft",
+        summary=topic_seed,
+    )
+    db.add(bundle)
+
+    create_task_execution_record(
+        db,
+        task_id=task.id,
+        group_id=task.group_id,
+        actor_user_id=actor_user.id,
+        event_type="created",
+        status_before="",
+        status_after=task.status,
+        detail={"title": task.title, "task_type": task.task_type, "source_type": task.source_type},
+    )
+    create_audit_log(
+        db,
+        action="agent_flow_run_created",
+        target_type="workflow_run",
+        target_id=str(run.id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"group_id": effective_group_id, "template_id": template.id, "task_id": task.id},
+    )
+    db.commit()
+    db.refresh(run)
+    db.refresh(bundle)
+    db.refresh(task)
+    return {
+        "ok": True,
+        "item": serialize_workflow_run(run, template=template, template_version=version, bundle=bundle, task=task),
+    }
+
+
+@app.get("/agent-flow/runs")
+def list_agent_flow_runs(
+    status: str = Query("", description="按状态过滤"),
+    group_id: Optional[int] = Query(default=None),
+    limit: int = Query(20, ge=1, le=100),
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    statement = select(WorkflowRun).order_by(desc(WorkflowRun.id)).limit(limit)
+    statement = apply_group_scope(statement, WorkflowRun.group_id, resolve_group_scope(db, actor_user, group_id))
+    if status:
+        statement = statement.where(WorkflowRun.status == status.strip())
+    items = db.scalars(statement).all()
+    changed = False
+    for item in items:
+        changed = sync_workflow_run_state(db, item) or changed
+    if changed:
+        db.commit()
+    template_ids = [item.template_id for item in items if item.template_id]
+    version_ids = [item.template_version_id for item in items if item.template_version_id]
+    task_ids = [item.task_record_id for item in items if item.task_record_id]
+    templates = {
+        item.id: item
+        for item in db.scalars(select(WorkflowTemplate).where(WorkflowTemplate.id.in_(template_ids or [-1]))).all()
+    }
+    versions = {
+        item.id: item
+        for item in db.scalars(
+            select(WorkflowTemplateVersion).where(WorkflowTemplateVersion.id.in_(version_ids or [-1]))
+        ).all()
+    }
+    bundles = {
+        item.run_id: item
+        for item in db.scalars(
+            select(WorkflowAssetBundle).where(WorkflowAssetBundle.run_id.in_([item.id for item in items] or [-1]))
+        ).all()
+    }
+    tasks = {
+        item.id: item for item in db.scalars(select(TaskRecord).where(TaskRecord.id.in_(task_ids or [-1]))).all()
+    }
+    return {
+        "ok": True,
+        "items": [
+            serialize_workflow_run(
+                item,
+                template=templates.get(item.template_id),
+                template_version=versions.get(item.template_version_id),
+                bundle=bundles.get(item.id),
+                task=tasks.get(item.task_record_id),
+            )
+            for item in items
+        ],
+    }
+
+
+@app.get("/agent-flow/runs/{run_id}")
+def get_agent_flow_run(
+    run_id: int,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    run = get_workflow_run_or_404(db, run_id)
+    resolve_group_scope(db, actor_user, run.group_id)
+    changed = sync_workflow_run_state(db, run)
+    if changed:
+        db.commit()
+        db.refresh(run)
+    template = db.scalar(select(WorkflowTemplate).where(WorkflowTemplate.id == run.template_id)) if run.template_id else None
+    version = (
+        db.scalar(select(WorkflowTemplateVersion).where(WorkflowTemplateVersion.id == run.template_version_id))
+        if run.template_version_id
+        else None
+    )
+    bundle = db.scalar(select(WorkflowAssetBundle).where(WorkflowAssetBundle.run_id == run.id))
+    task = db.scalar(select(TaskRecord).where(TaskRecord.id == run.task_record_id)) if run.task_record_id else None
+    return {
+        "ok": True,
+        "item": serialize_workflow_run(run, template=template, template_version=version, bundle=bundle, task=task),
+    }
+
+
+@app.get("/agent-flow/runs/{run_id}/stages")
+def list_agent_flow_run_stages(
+    run_id: int,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    run = get_workflow_run_or_404(db, run_id)
+    resolve_group_scope(db, actor_user, run.group_id)
+    changed = sync_workflow_run_state(db, run)
+    if changed:
+        db.commit()
+    items = db.scalars(
+        select(WorkflowRunStage).where(WorkflowRunStage.run_id == run_id).order_by(WorkflowRunStage.stage_order)
+    ).all()
+    return {"ok": True, "items": [serialize_workflow_stage(item) for item in items]}
+
+
+@app.get("/agent-flow/run-stages/{stage_id}")
+def get_agent_flow_run_stage(
+    stage_id: int,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    stage = get_workflow_stage_or_404(db, stage_id)
+    run = get_workflow_run_or_404(db, stage.run_id)
+    resolve_group_scope(db, actor_user, run.group_id)
+    changed = sync_workflow_run_state(db, run)
+    if changed:
+        db.commit()
+        db.refresh(stage)
+    return {"ok": True, "item": serialize_workflow_stage(stage)}
+
+
+@app.get("/agent-flow/runs/{run_id}/assets")
+def list_agent_flow_run_assets(
+    run_id: int,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    run = get_workflow_run_or_404(db, run_id)
+    resolve_group_scope(db, actor_user, run.group_id)
+    changed = sync_workflow_run_state(db, run)
+    if changed:
+        db.commit()
+    bundle = db.scalar(select(WorkflowAssetBundle).where(WorkflowAssetBundle.run_id == run_id))
+    if not bundle:
+        return {"ok": True, "bundle": None, "items": []}
+    items = db.scalars(
+        select(WorkflowAsset)
+        .where(WorkflowAsset.bundle_id == bundle.id)
+        .order_by(WorkflowAsset.sort_order, WorkflowAsset.id)
+    ).all()
+    return {"ok": True, "bundle": serialize_workflow_bundle(bundle), "items": [serialize_workflow_asset(item) for item in items]}
+
+
+@app.post("/agent-flow/runs/{run_id}/assets/select")
+def select_agent_flow_run_asset(
+    run_id: int,
+    payload: SelectWorkflowAssetRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    run = get_workflow_run_or_404(db, run_id)
+    resolve_group_scope(db, actor_user, run.group_id)
+    bundle = db.scalar(select(WorkflowAssetBundle).where(WorkflowAssetBundle.run_id == run_id))
+    if not bundle:
+        raise HTTPException(status_code=404, detail="当前运行还没有资产包")
+    asset = get_workflow_asset_or_404(db, payload.asset_id)
+    if asset.bundle_id != bundle.id:
+        raise HTTPException(status_code=400, detail="所选资产不属于当前运行")
+    siblings = db.scalars(
+        select(WorkflowAsset).where(
+            WorkflowAsset.bundle_id == bundle.id,
+            WorkflowAsset.asset_type == asset.asset_type,
+        )
+    ).all()
+    for item in siblings:
+        item.is_selected = item.id == asset.id
+    create_audit_log(
+        db,
+        action="agent_flow_asset_selected",
+        target_type="workflow_asset",
+        target_id=str(asset.id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"run_id": run.id, "bundle_id": bundle.id, "asset_type": asset.asset_type},
+    )
+    db.commit()
+    db.refresh(asset)
+    return {"ok": True, "item": serialize_workflow_asset(asset)}
+
+
+@app.get("/agent-flow/asset-bundles/{bundle_id}")
+def get_agent_flow_asset_bundle(
+    bundle_id: int,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    bundle = get_workflow_bundle_or_404(db, bundle_id)
+    run = get_workflow_run_or_404(db, bundle.run_id)
+    resolve_group_scope(db, actor_user, run.group_id)
+    changed = sync_workflow_run_state(db, run)
+    if changed:
+        db.commit()
+        db.refresh(bundle)
+    assets = db.scalars(
+        select(WorkflowAsset)
+        .where(WorkflowAsset.bundle_id == bundle.id)
+        .order_by(WorkflowAsset.asset_type, WorkflowAsset.sort_order, WorkflowAsset.id)
+    ).all()
+    links = db.scalars(
+        select(WorkflowPublishLink)
+        .where(WorkflowPublishLink.bundle_id == bundle.id)
+        .order_by(desc(WorkflowPublishLink.id))
+    ).all()
+    template = db.scalar(select(WorkflowTemplate).where(WorkflowTemplate.id == run.template_id)) if run.template_id else None
+    version = (
+        db.scalar(select(WorkflowTemplateVersion).where(WorkflowTemplateVersion.id == run.template_version_id))
+        if run.template_version_id
+        else None
+    )
+    task = db.scalar(select(TaskRecord).where(TaskRecord.id == run.task_record_id)) if run.task_record_id else None
+    return {
+        "ok": True,
+        "bundle": serialize_workflow_bundle(bundle),
+        "run": serialize_workflow_run(run, template=template, template_version=version, bundle=bundle, task=task),
+        "assets": [serialize_workflow_asset(item) for item in assets],
+        "publish_links": [serialize_workflow_publish_link(item) for item in links],
+    }
+
+
+@app.get("/agent-flow/assets/{asset_id}")
+def get_agent_flow_asset(
+    asset_id: int,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    asset = get_workflow_asset_or_404(db, asset_id)
+    bundle = get_workflow_bundle_or_404(db, asset.bundle_id)
+    run = get_workflow_run_or_404(db, bundle.run_id)
+    resolve_group_scope(db, actor_user, run.group_id)
+    return {
+        "ok": True,
+        "item": serialize_workflow_asset(asset),
+        "bundle": serialize_workflow_bundle(bundle),
+        "run_id": run.id,
+    }
+
+
+@app.put("/agent-flow/assets/{asset_id}")
+def update_agent_flow_asset(
+    asset_id: int,
+    payload: UpdateWorkflowAssetRequest,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    asset = get_workflow_asset_or_404(db, asset_id)
+    bundle = get_workflow_bundle_or_404(db, asset.bundle_id)
+    run = get_workflow_run_or_404(db, bundle.run_id)
+    resolve_group_scope(db, actor_user, run.group_id)
+    if payload.title is not None:
+        asset.title = str(payload.title).strip()
+    if payload.content_text is not None:
+        asset.content_text = str(payload.content_text)
+    if payload.content_json is not None:
+        asset.content_json = json.dumps(payload.content_json, ensure_ascii=False)
+    create_audit_log(
+        db,
+        action="agent_flow_asset_updated",
+        target_type="workflow_asset",
+        target_id=str(asset.id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"run_id": run.id, "bundle_id": bundle.id, "asset_type": asset.asset_type},
+    )
+    db.commit()
+    db.refresh(asset)
+    return {"ok": True, "item": serialize_workflow_asset(asset)}
+
+
+@app.post("/agent-flow/runs/{run_id}/retry")
+def retry_agent_flow_run(
+    run_id: int,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    run = get_workflow_run_or_404(db, run_id)
+    resolve_group_scope(db, actor_user, run.group_id)
+    task = get_task_or_404(db, int(run.task_record_id or 0))
+    state = get_task_runtime_state(task)
+    state["manual_retry_count"] = int(state.get("manual_retry_count", 0)) + 1
+    state["last_error"] = ""
+    append_task_history(state, "manual_retry", source="workflow_run")
+    save_task_runtime_state(task, state)
+    previous_status = task.status
+    if task.assigned_worker_code:
+        worker = db.scalar(select(WorkerNode).where(WorkerNode.worker_code == task.assigned_worker_code))
+        if worker:
+            set_worker_idle_if_online(worker, f"工作流运行 #{run.id} 已重试")
+    task.assigned_worker_code = ""
+    task.status = "queued"
+    task.triggered_by_user_id = actor_user.id
+    run.status = "queued"
+    run.current_stage_code = "topic_generate"
+    run.finished_at = None
+    bundle = db.scalar(select(WorkflowAssetBundle).where(WorkflowAssetBundle.run_id == run.id))
+    if bundle:
+        bundle.status = "draft"
+    for stage in db.scalars(select(WorkflowRunStage).where(WorkflowRunStage.run_id == run.id)).all():
+        stage.worker_code = ""
+        stage.error_message = ""
+        stage.output_payload_json = json.dumps({}, ensure_ascii=False)
+        stage.retry_count = 0
+        if stage.stage_code == "brief_collect":
+            stage.status = "success"
+        elif stage.stage_code == "topic_generate":
+            stage.status = "queued"
+            stage.started_at = None
+            stage.finished_at = None
+        else:
+            stage.status = "pending"
+            stage.started_at = None
+            stage.finished_at = None
+    create_task_execution_record(
+        db,
+        task_id=task.id,
+        group_id=task.group_id,
+        actor_user_id=actor_user.id,
+        event_type="manual_retry",
+        status_before=previous_status,
+        status_after=task.status,
+        attempt_count=int(state.get("attempt_count", 0)),
+        retry_count=int(state.get("retry_count", 0)),
+        detail={"workflow_run_id": run.id, "manual_retry_count": int(state.get("manual_retry_count", 0))},
+    )
+    create_audit_log(
+        db,
+        action="agent_flow_run_retried",
+        target_type="workflow_run",
+        target_id=str(run.id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"group_id": run.group_id, "task_id": task.id},
+    )
+    db.commit()
+    db.refresh(run)
+    return {"ok": True, "item": serialize_workflow_run(run, task=task, bundle=bundle)}
+
+
+@app.post("/agent-flow/run-stages/{stage_id}/retry")
+def retry_agent_flow_run_stage(
+    stage_id: int,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    stage = get_workflow_stage_or_404(db, stage_id)
+    run = get_workflow_run_or_404(db, stage.run_id)
+    resolve_group_scope(db, actor_user, run.group_id)
+    if stage.stage_code == "brief_collect":
+        raise HTTPException(status_code=400, detail="Brief 阶段无需单独重跑")
+    task = get_task_or_404(db, int(run.task_record_id or 0))
+    state = get_task_runtime_state(task)
+    state["manual_retry_count"] = int(state.get("manual_retry_count", 0)) + 1
+    state["last_error"] = ""
+    append_task_history(state, "manual_stage_retry", source="workflow_stage", stage_code=stage.stage_code)
+    save_task_runtime_state(task, state)
+    previous_status = task.status
+    if task.assigned_worker_code:
+        worker = db.scalar(select(WorkerNode).where(WorkerNode.worker_code == task.assigned_worker_code))
+        if worker:
+            set_worker_idle_if_online(worker, f"阶段 {stage.stage_name} 已手动重跑")
+    task.assigned_worker_code = ""
+    task.status = "queued"
+    task.triggered_by_user_id = actor_user.id
+    run.status = "queued"
+    run.current_stage_code = stage.stage_code
+    run.finished_at = None
+    bundle = db.scalar(select(WorkflowAssetBundle).where(WorkflowAssetBundle.run_id == run.id))
+    if bundle:
+        bundle.status = "draft"
+    stages = db.scalars(
+        select(WorkflowRunStage).where(WorkflowRunStage.run_id == run.id).order_by(WorkflowRunStage.stage_order)
+    ).all()
+    for item in stages:
+        if item.stage_order < stage.stage_order:
+            continue
+        item.worker_code = ""
+        item.error_message = ""
+        if item.stage_order == stage.stage_order:
+            item.retry_count = int(item.retry_count or 0) + 1
+            item.status = "queued"
+        else:
+            item.retry_count = 0
+            item.status = "pending"
+        item.output_payload_json = json.dumps({}, ensure_ascii=False)
+        item.started_at = None
+        item.finished_at = None
+    create_task_execution_record(
+        db,
+        task_id=task.id,
+        group_id=task.group_id,
+        actor_user_id=actor_user.id,
+        event_type="manual_stage_retry",
+        status_before=previous_status,
+        status_after=task.status,
+        attempt_count=int(state.get("attempt_count", 0)),
+        retry_count=int(state.get("retry_count", 0)),
+        detail={
+            "workflow_run_id": run.id,
+            "stage_id": stage.id,
+            "stage_code": stage.stage_code,
+            "manual_retry_count": int(state.get("manual_retry_count", 0)),
+        },
+    )
+    create_audit_log(
+        db,
+        action="agent_flow_stage_retried",
+        target_type="workflow_stage",
+        target_id=str(stage.id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"run_id": run.id, "stage_code": stage.stage_code, "task_id": task.id},
+    )
+    db.commit()
+    db.refresh(stage)
+    return {"ok": True, "item": serialize_workflow_stage(stage), "run_id": run.id}
+
+
+@app.post("/agent-flow/asset-bundles/{bundle_id}/push-publish-center")
+def push_agent_flow_bundle_to_publish_center(
+    bundle_id: int,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    bundle = get_workflow_bundle_or_404(db, bundle_id)
+    run = get_workflow_run_or_404(db, bundle.run_id)
+    resolve_group_scope(db, actor_user, run.group_id)
+    sync_workflow_run_state(db, run)
+    assets = db.scalars(
+        select(WorkflowAsset).where(WorkflowAsset.bundle_id == bundle.id).order_by(WorkflowAsset.sort_order, WorkflowAsset.id)
+    ).all()
+    publish_asset = next((item for item in assets if item.asset_type == "publish_copy"), None)
+    video_asset = next((item for item in assets if item.asset_type == "video_output"), None)
+    publish_payload = load_json_field(publish_asset.content_json, {}) if publish_asset else {}
+    hashtags = publish_payload.get("hashtags")
+    hashtags_text = " ".join(hashtags) if isinstance(hashtags, list) else str(hashtags or "")
+    title_text = str(publish_payload.get("title") or bundle.bundle_name or run.title).strip()
+    body_text = str(publish_payload.get("caption") or publish_asset.content_text or "").strip()
+    if hashtags_text:
+        body_text = f"{body_text}\n\n{hashtags_text}".strip()
+    link = WorkflowPublishLink(
+        group_id=bundle.group_id,
+        bundle_id=bundle.id,
+        publish_draft_id=None,
+        platform=bundle.primary_platform,
+        title_text=title_text,
+        body_text=body_text,
+        cover_asset_id=None,
+        video_asset_id=video_asset.id if video_asset else None,
+        status="pushed",
+        pushed_at=utcnow(),
+    )
+    db.add(link)
+    bundle.status = "published"
+    create_audit_log(
+        db,
+        action="agent_flow_bundle_pushed_publish_center",
+        target_type="workflow_bundle",
+        target_id=str(bundle.id),
+        actor_type="user",
+        actor_code=actor_user.username,
+        actor_user_id=actor_user.id,
+        detail={"run_id": run.id, "platform": bundle.primary_platform},
+    )
+    db.commit()
+    db.refresh(link)
+    return {
+        "ok": True,
+        "item": serialize_workflow_publish_link(link),
+        "draft": {
+            "source": "agent_flow_bundle",
+            "bundle_id": bundle.id,
+            "run_id": run.id,
+            "task_id": run.task_record_id,
+            "group_id": run.group_id,
+            "task_title": run.title,
+            "selected_topic": bundle.summary,
+            "optimized_prompt": "",
+            "video_prompt": "",
+            "video_url": video_asset.content_text if video_asset else "",
+            "publish": {
+                "title": title_text,
+                "hook": str(publish_payload.get("hook") or "").strip(),
+                "caption": str(publish_payload.get("caption") or "").strip(),
+                "hashtags": hashtags_text,
+            },
+            "copied_at": iso_now(),
+        },
+    }
+
+
+@app.get("/agent-flow/asset-bundles/{bundle_id}/publish-links")
+def list_agent_flow_publish_links(
+    bundle_id: int,
+    authorization: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    actor_user = require_active_user(db, authorization)
+    bundle = get_workflow_bundle_or_404(db, bundle_id)
+    run = get_workflow_run_or_404(db, bundle.run_id)
+    resolve_group_scope(db, actor_user, run.group_id)
+    items = db.scalars(
+        select(WorkflowPublishLink)
+        .where(WorkflowPublishLink.bundle_id == bundle_id)
+        .order_by(desc(WorkflowPublishLink.id))
+    ).all()
+    return {"ok": True, "items": [serialize_workflow_publish_link(item) for item in items]}
 
 
 @app.post("/tasks")

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
   DashboardShell,
@@ -13,141 +13,105 @@ import {
   inputStyle,
   readJson,
   secondaryButtonStyle,
-  taskStatusOptions,
+  formatDate,
 } from "./dashboard-ui";
 
 const tableHeadStyle = {
   padding: "10px 8px",
   textAlign: "left",
   color: "#94a3b8",
+  fontSize: 12,
+  fontWeight: 600,
 };
 
 const tableCellStyle = {
-  padding: "12px 8px",
+  padding: "10px 8px",
   borderTop: "1px solid #26314f",
   verticalAlign: "top",
+  fontSize: 13,
 };
 
-function buildAgentFlowPayload(topicSeed = "围绕AI短视频批量起号，生成可连续扩写的内容方向") {
+function buildBriefDraft(template) {
+  const currentVersion = template?.current_version || {};
+  const modelConfig = currentVersion.default_model_config || {};
+  const platforms = Array.isArray(template?.platform_scope) && template.platform_scope.length > 0
+    ? template.platform_scope
+    : ["tiktok"];
   return {
-    schema_version: "creator-task/v1",
-    source: {
-      asset_key: "",
-      start_seconds: 0,
-      end_seconds: 0,
-    },
-    publish: {
-      platforms: ["tiktok"],
-      need_subtitles: false,
-    },
-    output: {
-      prefix: "agent-flow",
-      target_height: 720,
-      video_codec: "libx264",
-      audio_codec: "aac",
-    },
-    execution: {
-      max_retries: 1,
-      simulate_fail: false,
-      required_capabilities: ["llm-agent"],
-      preferred_worker_codes: [],
-      lease_timeout_seconds: 1800,
-    },
-    agent_flow: {
-      goal: "选题/提示词优化/发布文案生成",
-      topic_seed: topicSeed,
-      platform: "tiktok",
-      audience: "想做AI视频副业的新手创作者",
-      tone: "高点击、强反差、适合短视频口播",
-      language: "zh-CN",
-      reference_prompt: "",
-      reference_copy: "",
-      deepseek: {
-        enabled: true,
-        model: "deepseek-chat",
-        temperature: 0.8,
-        max_topics: 5,
-      },
-      video: {
-        enabled: false,
-        provider: "agnes",
-        model: "agnes-video-2.5-flash",
-        seconds: "5",
-        size: "1280x720",
-        poll_timeout_seconds: 120,
-        poll_interval_seconds: 10,
-      },
-    },
-    dedupe: {
-      enabled: false,
-      profile: "balanced",
-      seed: 0,
-      randomize: true,
-    },
+    goal: "选题/提示词优化/发布文案生成",
+    topic_seed: "围绕 AI 短视频批量起号，生成可连续扩写的内容方向",
+    platform: platforms[0] || "tiktok",
+    audience: "想做 AI 视频副业的新手创作者",
+    tone: template?.style_type || "高点击、强反差、适合短视频口播",
+    language: "zh-CN",
+    reference_prompt: "",
+    reference_copy: "",
+    max_topics: String(modelConfig?.deepseek?.max_topics || 5),
+    video_enabled: Boolean(modelConfig?.video?.enabled),
   };
 }
 
-function buildAgentFlowFormPreset() {
-  const topicSeed = "围绕AI短视频批量起号，生成可连续扩写的内容方向";
+function normalizeBriefPayload(form) {
   return {
-    title: "AI文案工作流-选题提示词文案生成",
-    source_value: "账号定位：AI短视频批量起号；目标：先生成可直接投喂视频模型和发布中心的文案骨架",
-    priority: "high",
-    group_id: "",
-    preferred_worker_codes: "",
-    lease_timeout_seconds: "1800",
-    payload: JSON.stringify(buildAgentFlowPayload(topicSeed), null, 2),
+    goal: String(form.goal || "").trim(),
+    topic_seed: String(form.topic_seed || "").trim(),
+    platform: String(form.platform || "tiktok").trim() || "tiktok",
+    audience: String(form.audience || "").trim(),
+    tone: String(form.tone || "").trim(),
+    language: String(form.language || "zh-CN").trim() || "zh-CN",
+    reference_prompt: String(form.reference_prompt || "").trim(),
+    reference_copy: String(form.reference_copy || "").trim(),
+    max_topics: Number(form.max_topics || 5),
+    video_enabled: Boolean(form.video_enabled),
   };
 }
 
-function parseCsvInput(value) {
-  return String(value || "")
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
+function renderAssetPreview(asset) {
+  if (!asset) {
+    return "-";
+  }
+  if (asset.content_text) {
+    return asset.content_text;
+  }
+  return JSON.stringify(asset.content_json || {}, null, 2);
 }
 
-function getDeepseekResult(task) {
-  return task?.result?.agent_flow?.deepseek || {};
-}
-
-function getVideoResult(task) {
-  return task?.result?.agent_flow?.video || {};
-}
-
-function buildPublishDraft(task) {
-  const deepseek = getDeepseekResult(task);
-  const publishCopy = deepseek.publish_copy || {};
-  const video = getVideoResult(task);
-  const hashtags = Array.isArray(publishCopy.hashtags)
-    ? publishCopy.hashtags.join(" ")
-    : String(publishCopy.hashtags || "").trim();
-
-  return {
-    source: "agent_flow",
-    task_id: task.id,
-    task_title: task.title || "",
-    group_id: task.group_id || null,
-    selected_topic: deepseek.selected_topic || "",
-    optimized_prompt: deepseek.optimized_prompt || "",
-    video_prompt: deepseek.video_prompt || "",
-    video_url: video.video_url || "",
-    source_value: task.source_value || "",
-    publish: {
-      title: publishCopy.title || "",
-      hook: publishCopy.hook || "",
-      caption: publishCopy.caption || "",
-      hashtags,
-    },
-    copied_at: new Date().toISOString(),
+function StatusTag({ status }) {
+  const palette = {
+    success: { bg: "rgba(34,197,94,.14)", border: "rgba(34,197,94,.35)", color: "#86efac" },
+    running: { bg: "rgba(59,130,246,.14)", border: "rgba(59,130,246,.35)", color: "#93c5fd" },
+    queued: { bg: "rgba(245,158,11,.14)", border: "rgba(245,158,11,.35)", color: "#fcd34d" },
+    pending: { bg: "rgba(148,163,184,.14)", border: "rgba(148,163,184,.35)", color: "#cbd5e1" },
+    failed: { bg: "rgba(239,68,68,.14)", border: "rgba(239,68,68,.35)", color: "#fca5a5" },
+    cancelled: { bg: "rgba(100,116,139,.14)", border: "rgba(100,116,139,.35)", color: "#cbd5e1" },
   };
+  const current = palette[status] || palette.pending;
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        borderRadius: 999,
+        padding: "4px 10px",
+        border: `1px solid ${current.border}`,
+        background: current.bg,
+        color: current.color,
+        fontSize: 12,
+        lineHeight: 1,
+      }}
+    >
+      {status || "-"}
+    </span>
+  );
 }
 
 export default function AgentFlowPageClient() {
   const router = useRouter();
   const [groups, setGroups] = useState([]);
   const [workers, setWorkers] = useState([]);
-  const [tasks, setTasks] = useState([]);
+  const [templates, setTemplates] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [runs, setRuns] = useState([]);
   const [summary, setSummary] = useState({
     total: 0,
     pending: 0,
@@ -155,243 +119,246 @@ export default function AgentFlowPageClient() {
     success: 0,
     failed: 0,
   });
-  const [taskDrafts, setTaskDrafts] = useState({});
+  const [stages, setStages] = useState([]);
+  const [assets, setAssets] = useState([]);
+  const [assetBundle, setAssetBundle] = useState(null);
+  const [selectedRunId, setSelectedRunId] = useState("");
+  const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [groupFilter, setGroupFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [pageSize, setPageSize] = useState("20");
   const [busy, setBusy] = useState("");
   const [message, setMessage] = useState("已就绪");
-  const [taskForm, setTaskForm] = useState(() => buildAgentFlowFormPreset());
-  const [batchTopics, setBatchTopics] = useState(
-    "围绕AI短视频批量起号，生成一组适合连续更新的内容方向"
+  const [form, setForm] = useState({
+    title: "",
+    group_id: "",
+    project_id: "",
+    priority: "100",
+    ...buildBriefDraft(null),
+  });
+
+  const selectedTemplate = useMemo(
+    () => templates.find((item) => String(item.id) === String(selectedTemplateId)) || null,
+    [templates, selectedTemplateId]
+  );
+  const selectedRun = useMemo(
+    () => runs.find((item) => String(item.id) === String(selectedRunId)) || null,
+    [runs, selectedRunId]
   );
 
   async function loadGroups() {
-    try {
-      const data = await readJson(await authFetch("/api/groups", { cache: "no-store" }));
-      setGroups(data.items || []);
-    } catch (error) {
-      setGroups([]);
-      setMessage(error.message || "获取账号组失败");
-    }
+    const data = await readJson(await authFetch("/api/groups", { cache: "no-store" }));
+    setGroups(data.items || []);
   }
 
   async function loadWorkers() {
-    try {
-      const data = await readJson(await authFetch("/api/workers", { cache: "no-store" }));
-      setWorkers((data.items || []).filter((item) => (item.capabilities || []).includes("llm-agent")));
-    } catch (error) {
-      setWorkers([]);
-      setMessage(error.message || "获取 Worker 列表失败");
+    const data = await readJson(await authFetch("/api/workers", { cache: "no-store" }));
+    setWorkers((data.items || []).filter((item) => (item.capabilities || []).includes("llm-agent")));
+  }
+
+  async function loadTemplates(nextGroupId = groupFilter) {
+    const data = await readJson(
+      await authFetch(
+        `/api/agent-flow/templates?group_id=${encodeURIComponent(nextGroupId)}`,
+        { cache: "no-store" }
+      )
+    );
+    const items = data.items || [];
+    setTemplates(items);
+    if (!selectedTemplateId && items.length > 0) {
+      const template = items[0];
+      setSelectedTemplateId(String(template.id));
+      setForm((prev) => ({
+        ...prev,
+        title: template.template_name || "",
+        ...buildBriefDraft(template),
+      }));
     }
+  }
+
+  async function loadProjects(nextGroupId = groupFilter) {
+    const data = await readJson(
+      await authFetch(`/api/agent-flow/projects?group_id=${encodeURIComponent(nextGroupId)}`, { cache: "no-store" })
+    );
+    setProjects(data.items || []);
   }
 
   async function loadSummary(nextGroupId = groupFilter) {
-    try {
-      const data = await readJson(
-        await authFetch(
-          `/api/tasks/summary?task_type=agent_flow&group_id=${encodeURIComponent(nextGroupId)}`,
-          { cache: "no-store" }
-        )
-      );
-      setSummary(data);
-    } catch (error) {
-      setMessage(error.message || "获取 AI 文案任务摘要失败");
-    }
+    const data = await readJson(
+      await authFetch(
+        `/api/agent-flow/summary?group_id=${encodeURIComponent(nextGroupId)}`,
+        { cache: "no-store" }
+      )
+    );
+    setSummary(data);
   }
 
-  async function loadTasks(nextStatus = statusFilter, nextLimit = pageSize, nextGroupId = groupFilter) {
-    try {
-      const data = await readJson(
-        await authFetch(
-          `/api/tasks?task_type=agent_flow&status=${encodeURIComponent(nextStatus)}&group_id=${encodeURIComponent(nextGroupId)}&limit=${encodeURIComponent(nextLimit)}`,
-          { cache: "no-store" }
-        )
-      );
-      setTasks(data.items || []);
-    } catch (error) {
-      setTasks([]);
-      setMessage(error.message || "获取 AI 文案任务列表失败");
+  async function loadRuns(nextStatus = statusFilter, nextLimit = pageSize, nextGroupId = groupFilter) {
+    const data = await readJson(
+      await authFetch(
+        `/api/agent-flow/runs?status=${encodeURIComponent(nextStatus)}&group_id=${encodeURIComponent(nextGroupId)}&limit=${encodeURIComponent(nextLimit)}`,
+        { cache: "no-store" }
+      )
+    );
+    const items = data.items || [];
+    setRuns(items);
+    if (items.length === 0) {
+      setSelectedRunId("");
+      return;
     }
+    setSelectedRunId((prev) => {
+      const matched = items.find((item) => String(item.id) === String(prev));
+      return matched ? String(matched.id) : String(items[0].id);
+    });
+  }
+
+  async function loadRunDetails(runId) {
+    if (!runId) {
+      setStages([]);
+      setAssets([]);
+      setAssetBundle(null);
+      return;
+    }
+    const [stagesData, assetsData] = await Promise.all([
+      readJson(await authFetch(`/api/agent-flow/runs/${runId}/stages`, { cache: "no-store" })),
+      readJson(await authFetch(`/api/agent-flow/runs/${runId}/assets`, { cache: "no-store" })),
+    ]);
+    setStages(stagesData.items || []);
+    setAssets(assetsData.items || []);
+    setAssetBundle(assetsData.bundle || null);
   }
 
   async function reloadAll(nextStatus = statusFilter, nextLimit = pageSize, nextGroupId = groupFilter) {
     setMessage("正在刷新 AI 文案工作流...");
-    await Promise.all([loadGroups(), loadWorkers(), loadSummary(nextGroupId), loadTasks(nextStatus, nextLimit, nextGroupId)]);
-    setMessage("AI 文案工作流已刷新");
+    try {
+      await Promise.all([
+        loadGroups(),
+        loadWorkers(),
+        loadTemplates(nextGroupId),
+        loadProjects(nextGroupId),
+        loadSummary(nextGroupId),
+        loadRuns(nextStatus, nextLimit, nextGroupId),
+      ]);
+      setMessage("AI 文案工作流已刷新");
+    } catch (error) {
+      setMessage(error.message || "刷新工作流失败");
+    }
   }
 
   useEffect(() => {
     reloadAll("", "20", "");
   }, []);
 
-  function updateTaskDraft(taskId, field, value) {
-    setTaskDrafts((prev) => ({
+  useEffect(() => {
+    loadRunDetails(selectedRunId).catch((error) => setMessage(error.message || "加载运行详情失败"));
+  }, [selectedRunId]);
+
+  function applyTemplate(templateId) {
+    setSelectedTemplateId(templateId);
+    const template = templates.find((item) => String(item.id) === String(templateId));
+    if (!template) {
+      return;
+    }
+    setForm((prev) => ({
       ...prev,
-      [taskId]: {
-        ...(prev[taskId] || {}),
-        [field]: value,
-      },
+      title: template.template_name || prev.title,
+      ...buildBriefDraft(template),
     }));
   }
 
-  function parseTaskPayload() {
-    return JSON.parse(taskForm.payload || "{}");
-  }
-
-  function buildTaskRequest(sourceValue, topicSeed, index = 0) {
-    const suffix = index > 0 ? `-${String(index + 1).padStart(2, "0")}` : "";
-    const payload = parseTaskPayload();
-    payload.execution = {
-      ...(payload.execution || {}),
-      required_capabilities: ["llm-agent"],
-      preferred_worker_codes: parseCsvInput(taskForm.preferred_worker_codes),
-      lease_timeout_seconds: Number(taskForm.lease_timeout_seconds || 1800),
-    };
-    payload.agent_flow = {
-      ...(payload.agent_flow || {}),
-      topic_seed: topicSeed,
-    };
-    return {
-      title: `${taskForm.title}${suffix}`,
-      task_type: "agent_flow",
-      source_type: "manual",
-      source_value: sourceValue,
-      priority: taskForm.priority,
-      group_id: taskForm.group_id ? Number(taskForm.group_id) : null,
-      payload,
-    };
-  }
-
-  async function createTask(event) {
+  async function createRun(event) {
     event.preventDefault();
-    setBusy("create");
-    setMessage("正在创建 AI 文案任务...");
-    try {
-      const payload = parseTaskPayload();
-      const topicSeed = payload?.agent_flow?.topic_seed || "";
-      const data = await readJson(
-        await authFetch("/api/tasks", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(buildTaskRequest(taskForm.source_value, topicSeed)),
-        })
-      );
-      setMessage(`AI 文案任务已创建：#${data.item.id} ${data.item.title}`);
-      await reloadAll(statusFilter, pageSize, groupFilter);
-    } catch (error) {
-      setMessage(error.message || "创建 AI 文案任务失败");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function createBatchTasks() {
-    const seeds = batchTopics
-      .split(/\r?\n/)
-      .map((item) => item.trim())
-      .filter(Boolean);
-
-    if (seeds.length === 0) {
-      setMessage("请先填入至少一条批量选题方向");
+    if (!selectedTemplate) {
+      setMessage("当前没有可用模板");
       return;
     }
-
-    setBusy("batch");
-    setMessage(`正在批量创建 ${seeds.length} 条 AI 文案任务...`);
-    try {
-      const created = [];
-      for (let index = 0; index < seeds.length; index += 1) {
-        const response = await authFetch("/api/tasks", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(buildTaskRequest(seeds[index], seeds[index], index)),
-        });
-        const data = await readJson(response);
-        created.push(`#${data.item.id}`);
-      }
-      setMessage(`批量 AI 文案任务已创建：${created.join("、")}`);
-      await reloadAll(statusFilter, pageSize, groupFilter);
-    } catch (error) {
-      setMessage(error.message || "批量创建 AI 文案任务失败");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function saveTaskUpdate(task) {
-    const draft = taskDrafts[task.id] || {};
-    const nextStatus = draft.status ?? task.status;
-    const nextWorkerCode = draft.assigned_worker_code ?? task.assigned_worker_code ?? "";
-
-    setBusy(`task-${task.id}`);
-    setMessage(`正在保存任务 #${task.id}...`);
+    setBusy("create");
+    setMessage("正在创建工作流运行...");
     try {
       const data = await readJson(
-        await authFetch(`/api/tasks/${task.id}`, {
-          method: "PATCH",
+        await authFetch("/api/agent-flow/runs", {
+          method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            status: nextStatus,
-            assigned_worker_code: nextWorkerCode,
+            template_id: selectedTemplate.id,
+            template_version_id: selectedTemplate.current_version_id,
+            group_id: form.group_id ? Number(form.group_id) : null,
+            title: form.title,
+            priority: Number(form.priority || 100),
+            run_type: "single",
+            source_mode: "manual",
+            platform_targets: [form.platform],
+            brief_payload: normalizeBriefPayload(form),
+            project_id: form.project_id ? Number(form.project_id) : null,
           }),
         })
       );
-      setTaskDrafts((prev) => {
-        const next = { ...prev };
-        delete next[task.id];
-        return next;
-      });
-      setMessage(`AI 文案任务已更新：#${data.item.id} -> ${data.item.status}`);
+      setMessage(`工作流运行已创建：#${data.item.id} ${data.item.title}`);
       await reloadAll(statusFilter, pageSize, groupFilter);
+      setSelectedRunId(String(data.item.id));
     } catch (error) {
-      setMessage(error.message || "更新任务失败");
+      setMessage(error.message || "创建工作流运行失败");
     } finally {
       setBusy("");
     }
   }
 
-  async function retryTask(taskId) {
-    setBusy(`retry-${taskId}`);
-    setMessage(`正在重试任务 #${taskId}...`);
+  async function retryRun(run) {
+    setBusy(`retry-${run.id}`);
+    setMessage(`正在重试运行 #${run.id}...`);
     try {
       const data = await readJson(
-        await authFetch(`/api/tasks/${taskId}/retry`, {
+        await authFetch(`/api/agent-flow/runs/${run.id}/retry`, {
           method: "POST",
         })
       );
-      setMessage(`任务已重试入队：#${data.item.id}`);
+      setMessage(`运行已重新入队：#${data.item.id}`);
       await reloadAll(statusFilter, pageSize, groupFilter);
+      setSelectedRunId(String(run.id));
     } catch (error) {
-      setMessage(error.message || "任务重试失败");
+      setMessage(error.message || "重试运行失败");
     } finally {
       setBusy("");
     }
   }
 
-  function sendToPublish(task) {
+  async function pushToPublishCenter(run) {
+    if (!run?.bundle?.id) {
+      setMessage("当前运行还没有可用资产包");
+      return;
+    }
+    setBusy(`publish-${run.id}`);
+    setMessage(`正在把运行 #${run.id} 推送到发布中心...`);
     try {
-      const draft = buildPublishDraft(task);
-      setStoredPublishDraft(draft);
-      setMessage(`任务 #${task.id} 的结果已送到发布中心草稿`);
+      const data = await readJson(
+        await authFetch(`/api/agent-flow/asset-bundles/${run.bundle.id}/push-publish-center`, {
+          method: "POST",
+        })
+      );
+      if (data.draft) {
+        setStoredPublishDraft(data.draft);
+      }
+      setMessage(`运行 #${run.id} 已推送到发布中心草稿`);
       router.push("/publish");
     } catch (error) {
-      setMessage(error.message || "推送到发布中心失败");
+      setMessage(error.message || "推送发布中心失败");
+    } finally {
+      setBusy("");
     }
   }
 
   const summaryCards = [
     {
-      label: "AI 文案任务",
+      label: "工作流运行",
       value: String(summary.total || 0),
-      hint: "当前 agent_flow 总量",
+      hint: "当前工作流总量",
       ok: true,
     },
     {
       label: "待处理",
       value: String(summary.pending || 0),
       hint: "等待 LLM Worker 领取",
-      ok: (summary.pending || 0) > 0,
+      ok: (summary.pending || 0) >= 0,
     },
     {
       label: "运行中",
@@ -410,7 +377,7 @@ export default function AgentFlowPageClient() {
   return (
     <DashboardShell
       title="AI文案工作流"
-      description="这里单独处理选题、提示词优化、发布文案和可选视频提示词，不和普通任务中心混在一起。"
+      description="先把工作台闭环跑通：模板驱动创建运行、阶段可见、产物沉淀、结果推送发布中心。"
       action={
         <div style={{ display: "grid", gap: 10, minWidth: "min(100%, 620px)" }}>
           <div
@@ -427,6 +394,27 @@ export default function AgentFlowPageClient() {
             当前消息：{message}
           </div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+            <button
+              type="button"
+              style={secondaryButtonStyle}
+              onClick={() => router.push("/agent-flow/templates")}
+            >
+              打开模板库
+            </button>
+            <button
+              type="button"
+              style={secondaryButtonStyle}
+              onClick={() => router.push("/agent-flow/projects")}
+            >
+              打开项目库
+            </button>
+            <button
+              type="button"
+              style={secondaryButtonStyle}
+              onClick={() => router.push("/agent-flow/settings")}
+            >
+              打开设置中心
+            </button>
             <select
               style={{ ...inputStyle, width: 180 }}
               value={groupFilter}
@@ -443,19 +431,29 @@ export default function AgentFlowPageClient() {
                 </option>
               ))}
             </select>
-            <input
+            <select
               style={{ ...inputStyle, width: 150 }}
               value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value)}
-              placeholder="按状态过滤"
-            />
+              onChange={(event) => {
+                const nextValue = event.target.value;
+                setStatusFilter(nextValue);
+                loadRuns(nextValue, pageSize, groupFilter).catch((error) => setMessage(error.message || "获取运行列表失败"));
+              }}
+            >
+              <option value="">全部状态</option>
+              {["pending", "queued", "running", "success", "failed", "cancelled"].map((status) => (
+                <option key={status} value={status}>
+                  {status}
+                </option>
+              ))}
+            </select>
             <select
               style={{ ...inputStyle, width: 110 }}
               value={pageSize}
               onChange={(event) => {
                 const nextValue = event.target.value;
                 setPageSize(nextValue);
-                reloadAll(statusFilter, nextValue, groupFilter);
+                loadRuns(statusFilter, nextValue, groupFilter).catch((error) => setMessage(error.message || "获取运行列表失败"));
               }}
             >
               {["20", "50", "100"].map((value) => (
@@ -483,266 +481,409 @@ export default function AgentFlowPageClient() {
         ))}
       </section>
 
-      <div style={{ display: "grid", gap: 16 }}>
-        <Section
-          title="批量选题方向"
-          hint="每行一条方向，适合一次性生成多条选题和文案骨架。"
-          action={
-            <div style={{ fontSize: 12, color: "#94a3b8" }}>
-              当前共 {batchTopics.split(/\r?\n/).map((item) => item.trim()).filter(Boolean).length} 条
-            </div>
-          }
-        >
-          <div style={{ display: "grid", gap: 12 }}>
-            <textarea
-              style={{ ...inputStyle, minHeight: 132, resize: "vertical" }}
-              value={batchTopics}
-              onChange={(event) => setBatchTopics(event.target.value)}
-              placeholder={"每行一条选题方向\nAI短视频批量起号的新手避坑\nAI绘画壁纸号如何做内容裂变"}
-            />
-            <div style={{ ...cardStyle, padding: 12, fontSize: 12, color: "#94a3b8" }}>
-              批量创建时会把每一行同时写入 `source_value` 和 `agent_flow.topic_seed`，方便直接交给 DeepSeek 产出结果。
-            </div>
-          </div>
-        </Section>
-
-        <Section title="创建 AI 文案任务" hint="表单聚焦 agent_flow，避免普通任务字段干扰。">
-          <form onSubmit={createTask} style={{ display: "grid", gap: 12 }}>
-            <input
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(360px, 520px) minmax(0, 1fr)", gap: 16 }}>
+        <Section title="新建运行" hint="先按模板填写 Brief，再交给现有 agent_flow 执行链。">
+          <form onSubmit={createRun} style={{ display: "grid", gap: 12 }}>
+            <select
               style={inputStyle}
-              value={taskForm.title}
-              onChange={(event) => setTaskForm((prev) => ({ ...prev, title: event.target.value }))}
-              placeholder="任务标题"
-            />
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              value={selectedTemplateId}
+              onChange={(event) => applyTemplate(event.target.value)}
+            >
+              <option value="">选择模板</option>
+              {templates.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.template_name}
+                </option>
+              ))}
+            </select>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 120px", gap: 12 }}>
               <input
                 style={inputStyle}
-                value={taskForm.priority}
-                onChange={(event) => setTaskForm((prev) => ({ ...prev, priority: event.target.value }))}
+                value={form.title}
+                onChange={(event) => setForm((prev) => ({ ...prev, title: event.target.value }))}
+                placeholder="运行标题"
+              />
+              <input
+                style={inputStyle}
+                value={form.priority}
+                onChange={(event) => setForm((prev) => ({ ...prev, priority: event.target.value }))}
                 placeholder="优先级"
               />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
               <select
                 style={inputStyle}
-                value={taskForm.group_id}
-                onChange={(event) => setTaskForm((prev) => ({ ...prev, group_id: event.target.value }))}
+                value={form.group_id}
+                onChange={(event) => setForm((prev) => ({ ...prev, group_id: event.target.value }))}
               >
-                <option value="">归属账号组（可留空）</option>
+                <option value="">归属账号组</option>
                 {groups.map((group) => (
                   <option key={group.id} value={group.id}>
                     {group.group_name}
                   </option>
                 ))}
               </select>
-            </div>
-            <textarea
-              style={{ ...inputStyle, minHeight: 84, resize: "vertical" }}
-              value={taskForm.source_value}
-              onChange={(event) => setTaskForm((prev) => ({ ...prev, source_value: event.target.value }))}
-              placeholder="业务背景 / 账号定位 / 目标说明"
-            />
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
-              <input
+              <select
                 style={inputStyle}
-                value={taskForm.preferred_worker_codes}
-                onChange={(event) =>
-                  setTaskForm((prev) => ({ ...prev, preferred_worker_codes: event.target.value }))
-                }
-                placeholder="绑定 Worker，可留空"
-              />
-              <input
-                style={inputStyle}
-                value={taskForm.lease_timeout_seconds}
-                onChange={(event) =>
-                  setTaskForm((prev) => ({ ...prev, lease_timeout_seconds: event.target.value }))
-                }
-                placeholder="租约秒数"
-              />
-              <input
-                style={inputStyle}
-                value={workers.map((item) => item.worker_code).join(",")}
-                readOnly
-                placeholder="可用 LLM Worker"
-              />
-            </div>
-            <textarea
-              style={{ ...inputStyle, minHeight: 320, resize: "vertical", fontFamily: "Consolas, monospace" }}
-              value={taskForm.payload}
-              onChange={(event) => setTaskForm((prev) => ({ ...prev, payload: event.target.value }))}
-              placeholder="agent_flow payload JSON"
-            />
-            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <button type="submit" style={buttonStyle} disabled={busy === "create" || busy === "batch"}>
-                {busy === "create" ? "创建中..." : "创建 AI 文案任务"}
-              </button>
-              <button
-                type="button"
-                style={secondaryButtonStyle}
-                disabled={busy === "create" || busy === "batch"}
-                onClick={createBatchTasks}
+                value={form.project_id}
+                onChange={(event) => setForm((prev) => ({ ...prev, project_id: event.target.value }))}
               >
-                {busy === "batch" ? "批量创建中..." : "按上方方向批量创建"}
-              </button>
-              <button
-                type="button"
-                style={secondaryButtonStyle}
-                disabled={busy === "create" || busy === "batch"}
-                onClick={() => {
-                  const preset = buildAgentFlowFormPreset();
-                  setTaskForm(preset);
-                  setBatchTopics(JSON.parse(preset.payload).agent_flow.topic_seed || "");
-                  setMessage("已恢复默认 AI 文案模板");
+                <option value="">挂到项目（可留空）</option>
+                {projects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.project_name}
+                  </option>
+                ))}
+              </select>
+              <select
+                style={inputStyle}
+                value={form.platform}
+                onChange={(event) => setForm((prev) => ({ ...prev, platform: event.target.value }))}
+              >
+                {(selectedTemplate?.platform_scope || ["tiktok"]).map((platform) => (
+                  <option key={platform} value={platform}>
+                    {platform}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <textarea
+              style={{ ...inputStyle, minHeight: 90, resize: "vertical" }}
+              value={form.topic_seed}
+              onChange={(event) => setForm((prev) => ({ ...prev, topic_seed: event.target.value }))}
+              placeholder="选题方向 / 业务背景 / 核心冲突"
+            />
+            <input
+              style={inputStyle}
+              value={form.goal}
+              onChange={(event) => setForm((prev) => ({ ...prev, goal: event.target.value }))}
+              placeholder="任务目标"
+            />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <input
+                style={inputStyle}
+                value={form.audience}
+                onChange={(event) => setForm((prev) => ({ ...prev, audience: event.target.value }))}
+                placeholder="目标人群"
+              />
+              <input
+                style={inputStyle}
+                value={form.tone}
+                onChange={(event) => setForm((prev) => ({ ...prev, tone: event.target.value }))}
+                placeholder="文案风格"
+              />
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 120px 160px", gap: 12 }}>
+              <input
+                style={inputStyle}
+                value={form.language}
+                onChange={(event) => setForm((prev) => ({ ...prev, language: event.target.value }))}
+                placeholder="语言"
+              />
+              <input
+                style={inputStyle}
+                value={form.max_topics}
+                onChange={(event) => setForm((prev) => ({ ...prev, max_topics: event.target.value }))}
+                placeholder="候选数"
+              />
+              <label
+                style={{
+                  ...cardStyle,
+                  padding: "10px 12px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  fontSize: 13,
                 }}
               >
-                恢复默认模板
+                <input
+                  type="checkbox"
+                  checked={Boolean(form.video_enabled)}
+                  onChange={(event) => setForm((prev) => ({ ...prev, video_enabled: event.target.checked }))}
+                />
+                生成视频提示词
+              </label>
+            </div>
+            <textarea
+              style={{ ...inputStyle, minHeight: 80, resize: "vertical" }}
+              value={form.reference_prompt}
+              onChange={(event) => setForm((prev) => ({ ...prev, reference_prompt: event.target.value }))}
+              placeholder="参考提示词"
+            />
+            <textarea
+              style={{ ...inputStyle, minHeight: 80, resize: "vertical" }}
+              value={form.reference_copy}
+              onChange={(event) => setForm((prev) => ({ ...prev, reference_copy: event.target.value }))}
+              placeholder="参考文案"
+            />
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button type="submit" style={buttonStyle} disabled={busy === "create"}>
+                {busy === "create" ? "创建中..." : "创建工作流运行"}
+              </button>
+              <button
+                type="button"
+                style={secondaryButtonStyle}
+                onClick={() => {
+                  if (!selectedTemplate) {
+                    return;
+                  }
+                  setForm((prev) => ({
+                    ...prev,
+                    title: selectedTemplate.template_name || "",
+                    ...buildBriefDraft(selectedTemplate),
+                  }));
+                  setMessage("已恢复当前模板默认参数");
+                }}
+              >
+                恢复模板默认值
               </button>
             </div>
           </form>
         </Section>
 
         <Section
-          title="AI 文案任务队列"
-          hint="这里专门看选题结果、优化提示词、发布文案和可选视频任务状态。"
+          title="运行详情"
+          hint={selectedRun ? `当前选中运行 #${selectedRun.id}` : "点击下方运行列表查看阶段与资产"}
           action={
-            <div style={{ fontSize: 12, color: "#94a3b8" }}>
-              共 {summary.total || 0} 条，当前每页 {pageSize} 条
-            </div>
+            selectedRun ? (
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  style={secondaryButtonStyle}
+                  onClick={() => router.push(`/agent-flow/runs/${selectedRun.id}`)}
+                >
+                  打开详情页
+                </button>
+                {selectedRun.bundle?.id ? (
+                  <button
+                    type="button"
+                    style={secondaryButtonStyle}
+                    onClick={() => router.push(`/agent-flow/assets/${selectedRun.bundle.id}`)}
+                  >
+                    打开资产包
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  style={secondaryButtonStyle}
+                  onClick={() => retryRun(selectedRun)}
+                  disabled={!["failed", "cancelled", "success"].includes(selectedRun.status) || busy === `retry-${selectedRun.id}`}
+                >
+                  {busy === `retry-${selectedRun.id}` ? "重试中..." : "重试运行"}
+                </button>
+                <button
+                  type="button"
+                  style={buttonStyle}
+                  onClick={() => pushToPublishCenter(selectedRun)}
+                  disabled={selectedRun.status !== "success" || !selectedRun.bundle?.id || busy === `publish-${selectedRun.id}`}
+                >
+                  {busy === `publish-${selectedRun.id}` ? "推送中..." : "推送发布中心"}
+                </button>
+              </div>
+            ) : null
           }
         >
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-              <thead>
-                <tr>
-                  <th style={{ ...tableHeadStyle, width: 70 }}>ID</th>
-                  <th style={tableHeadStyle}>任务</th>
-                  <th style={{ ...tableHeadStyle, width: 320 }}>生成结果</th>
-                  <th style={{ ...tableHeadStyle, width: 130 }}>状态</th>
-                  <th style={{ ...tableHeadStyle, width: 160 }}>Worker</th>
-                  <th style={{ ...tableHeadStyle, width: 160 }}>尝试情况</th>
-                  <th style={{ ...tableHeadStyle, width: 220 }}>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tasks.length === 0 ? (
-                  <tr>
-                    <td colSpan={7} style={{ ...tableCellStyle, color: "#94a3b8" }}>
-                      当前筛选条件下还没有 AI 文案任务。
-                    </td>
-                  </tr>
-                ) : (
-                  tasks.map((item) => {
-                    const deepseek = getDeepseekResult(item);
-                    const publishCopy = deepseek.publish_copy || {};
-                    const video = getVideoResult(item);
-                    return (
-                      <tr key={item.id}>
-                        <td style={tableCellStyle}>{item.id}</td>
-                        <td style={tableCellStyle}>
-                          <div>{item.title}</div>
-                          <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
-                            {item.payload?.agent_flow?.topic_seed || item.source_value || "-"}
+          {!selectedRun ? (
+            <div style={{ color: "#94a3b8", fontSize: 13 }}>当前还没有选中的运行。</div>
+          ) : (
+            <div style={{ display: "grid", gap: 14 }}>
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+                  gap: 12,
+                }}
+              >
+                <div style={{ ...cardStyle, padding: 12 }}>
+                  <div style={{ fontSize: 12, color: "#94a3b8" }}>状态</div>
+                  <div style={{ marginTop: 8 }}><StatusTag status={selectedRun.status} /></div>
+                </div>
+                <div style={{ ...cardStyle, padding: 12 }}>
+                  <div style={{ fontSize: 12, color: "#94a3b8" }}>当前阶段</div>
+                  <div style={{ marginTop: 8, fontSize: 13 }}>{selectedRun.current_stage_code || "-"}</div>
+                </div>
+                <div style={{ ...cardStyle, padding: 12 }}>
+                  <div style={{ fontSize: 12, color: "#94a3b8" }}>模板</div>
+                  <div style={{ marginTop: 8, fontSize: 13 }}>{selectedRun.template?.template_name || "-"}</div>
+                </div>
+                <div style={{ ...cardStyle, padding: 12 }}>
+                  <div style={{ fontSize: 12, color: "#94a3b8" }}>资产包</div>
+                  <div style={{ marginTop: 8, fontSize: 13 }}>{assetBundle?.bundle_code || selectedRun.bundle?.bundle_code || "-"}</div>
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gap: 10 }}>
+                <div style={{ fontSize: 13, fontWeight: 700 }}>阶段看板</div>
+                <div style={{ display: "grid", gap: 8 }}>
+                  {stages.map((stage) => (
+                    <div
+                      key={stage.id}
+                      style={{
+                        ...cardStyle,
+                        padding: 12,
+                        display: "grid",
+                        gridTemplateColumns: "160px 110px 1fr 160px",
+                        gap: 12,
+                        alignItems: "center",
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>{stage.stage_name}</div>
+                        <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>{stage.stage_code}</div>
+                      </div>
+                      <StatusTag status={stage.status} />
+                      <div style={{ fontSize: 12, color: stage.error_message ? "#fca5a5" : "#94a3b8" }}>
+                        {stage.error_message || stage.worker_code || stage.required_capability || "-"}
+                      </div>
+                      <div style={{ fontSize: 12, color: "#94a3b8" }}>
+                        {stage.finished_at ? formatDate(stage.finished_at) : stage.started_at ? formatDate(stage.started_at) : "-"}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gap: 10 }}>
+                <div style={{ fontSize: 13, fontWeight: 700 }}>产物预览</div>
+                <div style={{ display: "grid", gap: 8 }}>
+                  {assets.length === 0 ? (
+                    <div style={{ ...cardStyle, padding: 12, fontSize: 12, color: "#94a3b8" }}>
+                      当前运行还没有可展示的资产。
+                    </div>
+                  ) : (
+                    assets.map((asset) => (
+                      <div key={asset.id} style={{ ...cardStyle, padding: 12 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 8 }}>
+                          <div>
+                            <div style={{ fontSize: 13, fontWeight: 600 }}>{asset.title || asset.asset_type}</div>
+                            <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>{asset.asset_type}</div>
                           </div>
-                          <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
-                            组 {item.group_id || "-"} / 创建人 {item.created_by_user_id || "-"} / 最近触发 {item.triggered_by_user_id || "-"}
-                          </div>
-                        </td>
-                        <td style={tableCellStyle}>
-                          {item.status === "success" ? (
-                            <div style={{ display: "grid", gap: 6 }}>
-                              <div style={{ color: "#e2e8f0" }}>选题：{deepseek.selected_topic || "-"}</div>
-                              <div style={{ fontSize: 12, color: "#94a3b8" }}>
-                                标题：{publishCopy.title || "-"}
-                              </div>
-                              <div style={{ fontSize: 12, color: "#94a3b8" }}>
-                                Hook：{publishCopy.hook || "-"}
-                              </div>
-                              <div style={{ fontSize: 12, color: "#94a3b8" }}>
-                                视频：{video.video_url ? <a href={video.video_url} target="_blank" rel="noreferrer" style={{ color: "#818cf8", textDecoration: "none" }}>查看结果</a> : video.status || "未启用"}
-                              </div>
-                            </div>
-                          ) : (
-                            <div style={{ fontSize: 12, color: "#94a3b8" }}>
-                              任务成功后会在这里显示选题、发布文案和可选视频结果。
-                            </div>
-                          )}
-                        </td>
-                        <td style={tableCellStyle}>
-                          <select
-                            style={inputStyle}
-                            value={taskDrafts[item.id]?.status ?? item.status}
-                            onChange={(event) => updateTaskDraft(item.id, "status", event.target.value)}
-                          >
-                            {taskStatusOptions.map((status) => (
-                              <option key={status} value={status}>
-                                {status}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                        <td style={tableCellStyle}>
-                          <select
-                            style={inputStyle}
-                            value={taskDrafts[item.id]?.assigned_worker_code ?? item.assigned_worker_code ?? ""}
-                            onChange={(event) =>
-                              updateTaskDraft(item.id, "assigned_worker_code", event.target.value)
-                            }
-                          >
-                            <option value="">自动分配</option>
-                            {workers.map((worker) => (
-                              <option key={worker.worker_code} value={worker.worker_code}>
-                                {worker.display_name}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                        <td style={tableCellStyle}>
-                          <div>尝试 {item.attempt_count || 0}</div>
-                          <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
-                            重试 {item.retry_count || 0}/{item.max_retries || 0}
-                          </div>
-                          {item.last_error ? (
-                            <div style={{ marginTop: 4, fontSize: 12, color: "#fca5a5" }}>{item.last_error}</div>
-                          ) : null}
-                        </td>
-                        <td style={tableCellStyle}>
-                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                            <button
-                              type="button"
-                              style={buttonStyle}
-                              onClick={() => saveTaskUpdate(item)}
-                              disabled={busy === `task-${item.id}`}
-                            >
-                              {busy === `task-${item.id}` ? "保存中..." : "保存"}
-                            </button>
-                            {["failed", "cancelled", "success"].includes(item.status) ? (
-                              <button
-                                type="button"
-                                style={secondaryButtonStyle}
-                                onClick={() => retryTask(item.id)}
-                                disabled={busy === `retry-${item.id}`}
-                              >
-                                {busy === `retry-${item.id}` ? "重试中..." : "手动重试"}
-                              </button>
-                            ) : null}
-                            {item.status === "success" ? (
-                              <button
-                                type="button"
-                                style={secondaryButtonStyle}
-                                onClick={() => sendToPublish(item)}
-                              >
-                                推送到发布中心
-                              </button>
-                            ) : null}
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })
-                )}
-              </tbody>
-            </table>
-          </div>
+                          <div style={{ fontSize: 12, color: "#94a3b8" }}>{asset.mime_type || "text/plain"}</div>
+                        </div>
+                        <pre
+                          style={{
+                            margin: 0,
+                            whiteSpace: "pre-wrap",
+                            wordBreak: "break-word",
+                            fontSize: 12,
+                            lineHeight: 1.6,
+                            color: "#cbd5e1",
+                          }}
+                        >
+                          {renderAssetPreview(asset)}
+                        </pre>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
         </Section>
       </div>
+
+      <Section
+        title="最近运行"
+        hint="工作台先以单页承接，模板、阶段、资产和推送结果都从这里汇总。"
+        action={<div style={{ fontSize: 12, color: "#94a3b8" }}>共 {summary.total || 0} 条</div>}
+      >
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={{ ...tableHeadStyle, width: 70 }}>ID</th>
+                <th style={tableHeadStyle}>运行</th>
+                <th style={{ ...tableHeadStyle, width: 120 }}>状态</th>
+                <th style={{ ...tableHeadStyle, width: 150 }}>当前阶段</th>
+                <th style={{ ...tableHeadStyle, width: 220 }}>资产包</th>
+                <th style={{ ...tableHeadStyle, width: 160 }}>更新时间</th>
+                <th style={{ ...tableHeadStyle, width: 260 }}>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {runs.length === 0 ? (
+                <tr>
+                  <td colSpan={7} style={{ ...tableCellStyle, color: "#94a3b8" }}>
+                    当前筛选条件下还没有工作流运行。
+                  </td>
+                </tr>
+              ) : (
+                runs.map((run) => (
+                  <tr key={run.id} style={{ background: String(run.id) === String(selectedRunId) ? "rgba(79,70,229,.08)" : "transparent" }}>
+                    <td style={tableCellStyle}>{run.id}</td>
+                    <td style={tableCellStyle}>
+                      <div style={{ fontWeight: 600 }}>{run.title}</div>
+                      <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
+                        {run.brief_payload?.topic_seed || "-"}
+                      </div>
+                      <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
+                        模板：{run.template?.template_name || "-"} / 项目：{run.project_id || "-"} / 组：{run.group_id || "-"}
+                      </div>
+                    </td>
+                    <td style={tableCellStyle}><StatusTag status={run.status} /></td>
+                    <td style={tableCellStyle}>
+                      <div>{run.current_stage_code || "-"}</div>
+                      <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
+                        Worker：{run.task?.assigned_worker_code || "-"}
+                      </div>
+                    </td>
+                    <td style={tableCellStyle}>
+                      <div>{run.bundle?.bundle_code || "-"}</div>
+                      <div style={{ marginTop: 4, fontSize: 12, color: "#94a3b8" }}>
+                        {run.bundle?.summary || "-"}
+                      </div>
+                    </td>
+                    <td style={tableCellStyle}>{formatDate(run.updated_at)}</td>
+                    <td style={tableCellStyle}>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          style={secondaryButtonStyle}
+                          onClick={() => setSelectedRunId(String(run.id))}
+                        >
+                          查看详情
+                        </button>
+                        <button
+                          type="button"
+                          style={secondaryButtonStyle}
+                          onClick={() => router.push(`/agent-flow/runs/${run.id}`)}
+                        >
+                          独立页
+                        </button>
+                        {run.bundle?.id ? (
+                          <button
+                            type="button"
+                            style={secondaryButtonStyle}
+                            onClick={() => router.push(`/agent-flow/assets/${run.bundle.id}`)}
+                          >
+                            资产包
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          style={secondaryButtonStyle}
+                          onClick={() => retryRun(run)}
+                          disabled={!["failed", "cancelled", "success"].includes(run.status) || busy === `retry-${run.id}`}
+                        >
+                          {busy === `retry-${run.id}` ? "重试中..." : "重试"}
+                        </button>
+                        <button
+                          type="button"
+                          style={buttonStyle}
+                          onClick={() => pushToPublishCenter(run)}
+                          disabled={run.status !== "success" || !run.bundle?.id || busy === `publish-${run.id}`}
+                        >
+                          {busy === `publish-${run.id}` ? "推送中..." : "推送发布"}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Section>
     </DashboardShell>
   );
 }

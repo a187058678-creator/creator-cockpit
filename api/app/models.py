@@ -1,4 +1,4 @@
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -293,5 +293,211 @@ class WorkerNode(Base):
         DateTime(timezone=True),
         server_default=func.now(),
         onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class WorkflowTemplate(Base):
+    __tablename__ = "workflow_templates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("account_groups.id"), nullable=True, index=True)
+    template_code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    template_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    category: Mapped[str] = mapped_column(String(64), nullable=False, default="general")
+    platform_scope_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    style_type: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    current_version_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    remark: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True, index=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class WorkflowTemplateVersion(Base):
+    __tablename__ = "workflow_template_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    template_id: Mapped[int] = mapped_column(ForeignKey("workflow_templates.id"), nullable=False, index=True)
+    version_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    version_name: Mapped[str] = mapped_column(String(128), nullable=False, default="v1")
+    brief_schema_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    stage_schema_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    prompt_blocks_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    style_bible_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    shot_bible_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    default_model_config_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    output_schema_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    is_published: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True, index=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class WorkflowProject(Base):
+    __tablename__ = "workflow_projects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("account_groups.id"), nullable=True, index=True)
+    project_code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    project_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    template_id: Mapped[int | None] = mapped_column(ForeignKey("workflow_templates.id"), nullable=True, index=True)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False, default="tiktok")
+    subject_domain: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    owner_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True, index=True)
+    remark: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class WorkflowRun(Base):
+    __tablename__ = "workflow_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("account_groups.id"), nullable=True, index=True)
+    project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    template_id: Mapped[int | None] = mapped_column(ForeignKey("workflow_templates.id"), nullable=True, index=True)
+    template_version_id: Mapped[int | None] = mapped_column(ForeignKey("workflow_template_versions.id"), nullable=True, index=True)
+    task_record_id: Mapped[int | None] = mapped_column(ForeignKey("task_records.id"), nullable=True, index=True)
+    run_code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    run_type: Mapped[str] = mapped_column(String(32), nullable=False, default="single")
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    brief_payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    platform_targets_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft", index=True)
+    current_stage_code: Mapped[str] = mapped_column(String(64), nullable=False, default="brief_collect")
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    source_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True, index=True)
+    triggered_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("user_accounts.id"), nullable=True, index=True)
+    started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class WorkflowRunStage(Base):
+    __tablename__ = "workflow_run_stages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("workflow_runs.id"), nullable=False, index=True)
+    stage_code: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    stage_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    stage_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    worker_code: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    required_capability: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    input_payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    output_payload_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    error_message: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class WorkflowAssetBundle(Base):
+    __tablename__ = "workflow_asset_bundles"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("account_groups.id"), nullable=True, index=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("workflow_runs.id"), nullable=False, index=True)
+    bundle_code: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    bundle_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(64), nullable=False, default="short_video")
+    primary_platform: Mapped[str] = mapped_column(String(32), nullable=False, default="tiktok")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft", index=True)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class WorkflowAsset(Base):
+    __tablename__ = "workflow_assets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("account_groups.id"), nullable=True, index=True)
+    bundle_id: Mapped[int] = mapped_column(ForeignKey("workflow_asset_bundles.id"), nullable=False, index=True)
+    run_stage_id: Mapped[int | None] = mapped_column(ForeignKey("workflow_run_stages.id"), nullable=True, index=True)
+    asset_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    asset_role: Mapped[str] = mapped_column(String(64), nullable=False, default="primary")
+    title: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    content_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    content_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
+    file_asset_id: Mapped[int | None] = mapped_column(ForeignKey("asset_records.id"), nullable=True, index=True)
+    r2_key: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    mime_type: Mapped[str] = mapped_column(String(128), nullable=False, default="")
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    version_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_selected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+
+class WorkflowPublishLink(Base):
+    __tablename__ = "workflow_publish_links"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("account_groups.id"), nullable=True, index=True)
+    bundle_id: Mapped[int] = mapped_column(ForeignKey("workflow_asset_bundles.id"), nullable=False, index=True)
+    publish_draft_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False, default="tiktok")
+    title_text: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    body_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    cover_asset_id: Mapped[int | None] = mapped_column(ForeignKey("workflow_assets.id"), nullable=True)
+    video_asset_id: Mapped[int | None] = mapped_column(ForeignKey("workflow_assets.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    pushed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
         nullable=False,
     )
